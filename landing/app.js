@@ -1,6 +1,6 @@
 // Bear on Stellar — Landing Page
 // Scroll reveals, copy-to-clipboard, mobile nav, contract address loading,
-// animated protocol stack diagram
+// animated protocol stack diagram, interactive SDK snippet viewer
 
 document.addEventListener("DOMContentLoaded", () => {
   // ── Dashboard link base URL ──
@@ -75,357 +75,262 @@ document.addEventListener("DOMContentLoaded", () => {
   document.body.appendChild(toast);
 
   let toastTimeout;
+  function showToast(message) {
+    toast.textContent = message || "Copied!";
+    toast.classList.add("show");
+    clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => toast.classList.remove("show"), 1500);
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;opacity:0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+  }
+
   document.querySelectorAll(".contract-addr").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const addr = btn.dataset.address;
       if (!addr) return;
-      try {
-        await navigator.clipboard.writeText(addr);
-      } catch {
-        const ta = document.createElement("textarea");
-        ta.value = addr;
-        ta.style.cssText = "position:fixed;opacity:0";
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand("copy");
-        ta.remove();
-      }
-      toast.classList.add("show");
-      clearTimeout(toastTimeout);
-      toastTimeout = setTimeout(() => toast.classList.remove("show"), 1500);
+      await copyText(addr);
+      showToast("Copied!");
     });
   });
+
+  // ── Interactive SDK snippet viewer (issue #600) ──
+  // Renders the selected use-case snippet with lightweight syntax
+  // highlighting and a one-click copy button with tooltip feedback.
+  const SNIPPETS = {
+    identity: {
+      label: "Identity",
+      code: [
+        "import { MarcClient } from 'marc-stellar-sdk';\n",
+        "\n",
+        "const client = new MarcClient({ network: 'testnet' });\n",
+        "\n",
+        "// Register an agent identity (ERC-8004)\n",
+        "const agent = await client.identity.register({\n",
+        "  name: 'research-agent',\n",
+        "  capabilities: ['search', 'summarize'],\n",
+        "  metadataUri: 'ipfs://bafy...',\n",
+        "});\n",
+        "\n",
+        "console.log('Agent registered:', agent.id);\n",
+      ].join(""),
+    },
+    escrow: {
+      label: "Escrow Job",
+      code: [
+        "import { MarcClient } from 'marc-stellar-sdk';\n",
+        "\n",
+        "const client = new MarcClient({ network: 'testnet' });\n",
+        "\n",
+        "// Create an escrow-backed job (ERC-8183)\n",
+        "const job = await client.jobs.create({\n",
+        "  provider: 'G...PROVIDER',\n",
+        "  amount: '100',\n",
+        "  asset: 'USDC',\n",
+        "  deadline: Math.floor(Date.now() / 1000) + 3600,\n",
+        "});\n",
+        "\n",
+        "await job.fund();\n",
+        "console.log('Job funded:', job.id);\n",
+      ].join(""),
+    },
+    x402: {
+      label: "x402 Paywall",
+      code: [
+        "import { MarcClient } from 'marc-stellar-sdk';\n",
+        "\n",
+        "const client = new MarcClient({ network: 'testnet' });\n",
+        "\n",
+        "// Gate an endpoint behind an x402 paywall\n",
+        "const paywall = client.x402.paywall({\n",
+        "  price: '0.01',\n",
+        "  asset: 'USDC',\n",
+        "  payTo: 'G...MERCHANT',\n",
+        "});\n",
+        "\n",
+        "app.get('/premium', paywall, (req, res) => {\n",
+        "  res.json({ data: 'paid content' });\n",
+        "});\n",
+      ].join(""),
+    },
+    fetch: {
+      label: "Fetch with Payment",
+      code: [
+        "import { MarcClient } from 'marc-stellar-sdk';\n",
+        "\n",
+        "const client = new MarcClient({ network: 'testnet' });\n",
+        "\n",
+        "// Automatically settle HTTP 402 challenges\n",
+        "const res = await client.x402.fetch('https://api.example.com/premium', {\n",
+        "  method: 'GET',\n",
+        "  maxAmount: '0.05',\n",
+        "});\n",
+        "\n",
+        "const data = await res.json();\n",
+        "console.log('Paid response:', data);\n",
+      ].join(""),
+    },
+  };
+
+  const snippetViewer = document.querySelector("[data-snippet-viewer]");
+  if (snippetViewer) {
+    const tabs = snippetViewer.querySelectorAll("[data-snippet-tab]");
+    const codeEl = snippetViewer.querySelector("[data-snippet-code]");
+    const copyBtn = snippetViewer.querySelector("[data-snippet-copy]");
+    const tooltip = snippetViewer.querySelector("[data-snippet-tooltip]");
+    let activeKey = tabs[0]?.dataset.snippetTab || "identity";
+
+    // Minimal tokenizer: comments, strings, keywords, numbers.
+    function highlight(code) {
+      const escaped = code
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      return escaped
+        .replace(/(\/\/[^\n]*)/g, '<span class="tok-comment">$1</span>')
+        .replace(/(&#39;|')([^'\n]*)(&#39;|')/g, '<span class="tok-string">$1$2$3</span>')
+        .replace(/\b(import|from|const|await|async|new|return|console)\b/g, '<span class="tok-keyword">$1</span>')
+        .replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="tok-number">$1</span>');
+    }
+
+    function renderSnippet(key) {
+      const snippet = SNIPPETS[key];
+      if (!snippet || !codeEl) return;
+      activeKey = key;
+      codeEl.innerHTML = highlight(snippet.code);
+      tabs.forEach((tab) => {
+        const isActive = tab.dataset.snippetTab === key;
+        tab.classList.toggle("active", isActive);
+        tab.setAttribute("aria-selected", String(isActive));
+      });
+    }
+
+    tabs.forEach((tab) => {
+      tab.addEventListener("click", () => renderSnippet(tab.dataset.snippetTab));
+    });
+
+    let tooltipTimeout;
+    copyBtn?.addEventListener("click", async () => {
+      const snippet = SNIPPETS[activeKey];
+      if (!snippet) return;
+      await copyText(snippet.code);
+      if (tooltip) {
+        tooltip.classList.add("show");
+        clearTimeout(tooltipTimeout);
+        tooltipTimeout = setTimeout(() => tooltip.classList.remove("show"), 1500);
+      }
+      showToast("Copied!");
+    });
+
+    renderSnippet(activeKey);
+  }
 
   // ── Mobile hamburger toggle ──
   const hamburger = document.getElementById("hamburger");
-  const navLinksContainer = document.getElementById("nav-links");
-  hamburger?.addEventListener("click", () => {
-    const open = navLinksContainer.classList.toggle("nav-open");
-    hamburger.setAttribute("aria-expanded", String(open));
-  });
-  navLinksContainer?.querySelectorAll(".nav-link").forEach((link) => {
-    link.addEventListener("click", () => {
-      navLinksContainer.classList.remove("nav-open");
-      hamburger?.setAttribute("aria-expanded", "false");
+  const mobileMenu = document.getElementById("mobile-menu");
+  if (hamburger && mobileMenu) {
+    const setMenuState = (open) => {
+      mobileMenu.classList.toggle("open", open);
+      hamburger.classList.toggle("active", open);
+      hamburger.setAttribute("aria-expanded", String(open));
+      hamburger.setAttribute("aria-controls", "mobile-menu");
+      hamburger.setAttribute("aria-label", open ? "Close navigation menu" : "Open navigation menu");
+    };
+    setMenuState(false);
+    hamburger.addEventListener("click", () => {
+      setMenuState(!mobileMenu.classList.contains("open"));
     });
-  });
-
-  // ── Live contract addresses (issue #304) ──
-  // Fetch from the /api/contract-addresses serverless endpoint and populate
-  // the contract cards. Falls back silently to the hardcoded values already
-  // in the HTML if the endpoint is unavailable.
-  const CONTRACT_KEYS = {
-    agent_identity: "CAMPXYFZJTIPEVOPOAZPRG5OHXKNBDPGTPRCOIO4LVPGEM4TONPY65A5",
-    agentic_commerce: "CD2KWU7IE74Z2QKVP3FQ67J46XHNMGIDTNKXVWE7ZNVRC7T6UH46GQXE",
-  };
-
-  async function loadContractAddresses() {
-    try {
-      const res = await fetch("/api/contract-addresses");
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!data?.contracts) return;
-
-      const cardMap = {
-        agent_identity: document.querySelector('[data-contract="agent_identity"]'),
-        agentic_commerce: document.querySelector('[data-contract="agentic_commerce"]'),
-      };
-
-      for (const [key, card] of Object.entries(cardMap)) {
-        const info = data.contracts[key];
-        if (!card || !info?.address) continue;
-        const btn = card.querySelector(".contract-addr");
-        const code = card.querySelector(".contract-addr code");
-        const full = card.querySelector(".contract-addr-full");
-        const explorerLink = card.querySelector(".contract-explorer");
-        if (btn) btn.dataset.address = info.address;
-        if (code) code.textContent = info.address.slice(0, 4) + "..." + info.address.slice(-6);
-        if (full) full.textContent = info.address;
-        if (explorerLink && info.explorer) explorerLink.href = info.explorer;
-      }
-
-      // Mark cards as live-loaded for visibility
-      document.querySelectorAll(".contracts-grid [data-contract]").forEach((c) => {
-        c.classList.add("contracts-live");
-      });
-    } catch {
-      // Silently fall back to static values
-    }
   }
 
-  loadContractAddresses();
+  // ── Modal accessibility (issue #601) ──
+  // Adds dialog semantics, Escape-to-close, focus trapping while open, and
+  // focus restoration to the trigger element on close.
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-  // ── Animated Protocol Stack Diagram (issue #303) ──
-  const canvas = document.getElementById("protocol-diagram");
-  if (canvas && canvas.getContext) {
-    const ctx = canvas.getContext("2d");
-    const DPR = window.devicePixelRatio || 1;
-
-    function resizeCanvas() {
-      const rect = canvas.parentElement.getBoundingClientRect();
-      canvas.width = rect.width * DPR;
-      canvas.height = 280 * DPR;
-      canvas.style.width = rect.width + "px";
-      canvas.style.height = "280px";
-      ctx.scale(DPR, DPR);
-    }
-    resizeCanvas();
-    window.addEventListener("resize", () => {
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      resizeCanvas();
-    });
-
-    const LAYERS = [
-      { label: "Agent Identity", sublabel: "ERC-8004 · Register", color: "#F97316", y: 40 },
-      {
-        label: "Agentic Commerce",
-        sublabel: "ERC-8183 · Escrow & Settle",
-        color: "#FB923C",
-        y: 120,
-      },
-      { label: "x402 / MPP", sublabel: "HTTP 402 · Micropayments", color: "#FED7AA", y: 200 },
-    ];
-
-    const ARROW_COLOR = "#F97316";
-    let tick = 0;
-    let animationId;
-    let diagramVisible = false;
-
-    const diagramObserver = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting && !diagramVisible) {
-            diagramVisible = true;
-            tick = 0;
-            drawLoop();
-          }
-        });
-      },
-      { threshold: 0.2 },
-    );
-    diagramObserver.observe(canvas);
-
-    function easeOutCubic(t) {
-      return 1 - Math.pow(1 - t, 3);
-    }
-
-    function drawLayer(layer, progress, w) {
-      const boxH = 60;
-      const boxW = Math.min(w - 48, 640);
-      const x = (w - boxW) / 2;
-      const y = layer.y;
-      const alpha = easeOutCubic(Math.min(progress, 1));
-      const slideX = (1 - alpha) * -24;
-
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.translate(slideX, 0);
-
-      // Card background
-      ctx.beginPath();
-      ctx.roundRect(x, y, boxW, boxH, 10);
-      ctx.fillStyle = "#fff";
-      ctx.shadowColor = "rgba(249,115,22,0.12)";
-      ctx.shadowBlur = 16;
-      ctx.fill();
-      ctx.shadowBlur = 0;
-
-      // Left accent bar
-      ctx.beginPath();
-      ctx.roundRect(x, y, 4, boxH, [10, 0, 0, 10]);
-      ctx.fillStyle = layer.color;
-      ctx.fill();
-
-      // Label
-      ctx.fillStyle = "#0A0A0A";
-      ctx.font = "600 15px Inter, system-ui, sans-serif";
-      ctx.fillText(layer.label, x + 20, y + 26);
-
-      // Sublabel
-      ctx.fillStyle = "#6B7280";
-      ctx.font = "500 12px Inter, system-ui, sans-serif";
-      ctx.fillText(layer.sublabel, x + 20, y + 46);
-
-      // Right color chip
-      const chipW = 56;
-      const chipX = x + boxW - chipW - 14;
-      const chipY = y + 18;
-      ctx.beginPath();
-      ctx.roundRect(chipX, chipY, chipW, 22, 11);
-      ctx.fillStyle = layer.color + "22";
-      ctx.fill();
-      ctx.fillStyle = layer.color;
-      ctx.font = "600 11px Inter, system-ui, sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText("LIVE", chipX + chipW / 2, chipY + 14.5);
-      ctx.textAlign = "left";
-
-      ctx.restore();
-    }
-
-    function drawArrow(fromY, progress, w) {
-      if (progress <= 0) return;
-      const boxW = Math.min(w - 48, 640);
-      const x = w / 2;
-      const startY = fromY + 60;
-      const endY = fromY + 78;
-      const alpha = easeOutCubic(Math.min(progress, 1));
-
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.strokeStyle = ARROW_COLOR;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([4, 3]);
-      ctx.beginPath();
-      ctx.moveTo(x, startY);
-      ctx.lineTo(x, endY);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Arrowhead
-      ctx.fillStyle = ARROW_COLOR;
-      ctx.beginPath();
-      ctx.moveTo(x, endY + 6);
-      ctx.lineTo(x - 5, endY);
-      ctx.lineTo(x + 5, endY);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-    }
-
-    // Pulse animation on the LIVE chips
-    function drawPulse(w) {
-      const pulse = (Math.sin(tick * 0.05) + 1) / 2; // 0..1
-      LAYERS.forEach((layer) => {
-        const boxW = Math.min(w - 48, 640);
-        const x = (w - boxW) / 2;
-        const chipW = 56;
-        const chipX = x + boxW - chipW - 14;
-        const chipY = layer.y + 18;
-        ctx.save();
-        ctx.globalAlpha = 0.35 * pulse;
-        ctx.beginPath();
-        ctx.roundRect(chipX, chipY, chipW, 22, 11);
-        ctx.fillStyle = layer.color;
-        ctx.fill();
-        ctx.restore();
-      });
-    }
-
-    const PHASE_DURATION = 22; // frames per layer reveal
-
-    function drawLoop() {
-      tick++;
-      const w = canvas.width / DPR;
-      const h = canvas.height / DPR;
-
-      ctx.clearRect(0, 0, w, h);
-
-      LAYERS.forEach((layer, i) => {
-        const start = i * PHASE_DURATION;
-        const progress = (tick - start) / PHASE_DURATION;
-        drawLayer(layer, progress, w);
-
-        if (i < LAYERS.length - 1) {
-          const arrowStart = start + PHASE_DURATION * 0.6;
-          drawArrow(layer.y, (tick - arrowStart) / (PHASE_DURATION * 0.4), w);
+  document.querySelectorAll("[data-modal]")
+    .forEach((modal) => {
+      const dialog = modal.querySelector("[role='dialog']") || modal;
+      const labelledBy = dialog.getAttribute("aria-labelledby");
+      if (!dialog.hasAttribute("role")) dialog.setAttribute("role", "dialog");
+      dialog.setAttribute("aria-modal", "true");
+      if (!labelledBy) {
+        const heading = dialog.querySelector("h1, h2, h3, [data-modal-title]");
+        if (heading) {
+          if (!heading.id) heading.id = "modal-title-" + Math.random().toString(36).slice(2, 8);
+          dialog.setAttribute("aria-labelledby", heading.id);
         }
-      });
-
-      const fullyLoaded = tick > LAYERS.length * PHASE_DURATION;
-      if (fullyLoaded) {
-        drawPulse(w);
       }
 
-      animationId = requestAnimationFrame(drawLoop);
-    }
-  }
+      let lastFocused = null;
 
-  // ── Try It playground — StackBlitz embed (issue #305) ──
-  const playgroundSection = document.getElementById("try-it");
-  const embedContainer = document.getElementById("stackblitz-embed");
-  const loadPlaygroundBtn = document.getElementById("load-playground");
+      const getFocusable = () =>
+        Array.from(dialog.querySelectorAll(FOCUSABLE)).filter(
+          (el) => el.offsetParent !== null || el === document.activeElement,
+        );
 
-  if (loadPlaygroundBtn && embedContainer) {
-    loadPlaygroundBtn.addEventListener("click", () => {
-      loadPlaygroundBtn.disabled = true;
-      loadPlaygroundBtn.textContent = "Loading…";
-
-      // StackBlitz embed: open a pre-configured Node.js project demonstrating
-      // the marc-stellar-sdk. The project URL encodes the files as query params
-      // so no backend is needed — everything runs in the browser sandbox.
-      const sbFiles = {
-        "index.js": [
-          "// Bear Protocol — marc-stellar-sdk browser playground",
-          "// Edit and run this file to explore the SDK.",
-          "",
-          "import { IdentityClient, CommerceClient, TESTNET } from 'marc-stellar-sdk';",
-          "import { Keypair } from '@stellar/stellar-sdk';",
-          "",
-          "const config = {",
-          "  rpcUrl: TESTNET.rpcUrl,",
-          "  networkPassphrase: TESTNET.networkPassphrase,",
-          "  identityContract: TESTNET.identityContract,",
-          "  commerceContract: TESTNET.commerceContract,",
-          "  usdcToken: TESTNET.usdcToken,",
-          "};",
-          "",
-          "console.log('TESTNET config:', config);",
-          "",
-          "// -- Register an agent identity --",
-          "// const keypair = Keypair.random();",
-          "// const identity = new IdentityClient(config);",
-          "// const agentId = await identity.register(keypair, 'https://ipfs.example/metadata.json');",
-          "// console.log('Registered agent:', agentId);",
-          "",
-          "// -- Create an escrow job --",
-          "// const commerce = new CommerceClient(config);",
-          "// const jobId = await commerce.createJob(",
-          "//   keypair, provider, evaluator, config.usdcToken, 10_000_000n, 'Analyze data'",
-          "// );",
-          "// console.log('Job created:', jobId);",
-        ].join("\n"),
-        "package.json": JSON.stringify(
-          {
-            name: "bear-protocol-playground",
-            version: "1.0.0",
-            type: "module",
-            dependencies: {
-              "marc-stellar-sdk": "latest",
-              "@stellar/stellar-sdk": "^12.0.0",
-            },
-          },
-          null,
-          2,
-        ),
+      const onKeydown = (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeModal();
+          return;
+        }
+        if (event.key !== "Tab") return;
+        const focusable = getFocusable();
+        if (focusable.length === 0) {
+          event.preventDefault();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
       };
 
-      // Build StackBlitz URL with embedded files
-      const params = new URLSearchParams();
-      params.set("title", "Bear Protocol Playground");
-      params.set("description", "marc-stellar-sdk interactive playground");
-      params.set("template", "node");
-      for (const [filename, content] of Object.entries(sbFiles)) {
-        params.set(`files[${filename}]`, content);
+      function openModal() {
+        lastFocused = document.activeElement;
+        modal.classList.add("open");
+        modal.setAttribute("aria-hidden", "false");
+        document.addEventListener("keydown", onKeydown);
+        const focusable = getFocusable();
+        (focusable[0] || dialog).focus();
       }
-      params.set("embed", "1");
-      params.set("view", "editor");
-      params.set("theme", "light");
-      params.set("hideNavigation", "1");
 
-      const iframe = document.createElement("iframe");
-      iframe.src = `https://stackblitz.com/run?${params.toString()}`;
-      iframe.title = "Bear Protocol SDK Playground";
-      iframe.allow = "cross-origin-isolated";
-      iframe.loading = "lazy";
-      iframe.className = "playground-iframe";
-      iframe.setAttribute("aria-label", "Interactive SDK playground powered by StackBlitz");
+      function closeModal() {
+        modal.classList.remove("open");
+        modal.setAttribute("aria-hidden", "true");
+        document.removeEventListener("keydown", onKeydown);
+        if (lastFocused && typeof lastFocused.focus === "function") {
+          lastFocused.focus();
+        }
+      }
 
-      iframe.addEventListener("load", () => {
-        loadPlaygroundBtn.parentElement?.removeChild(loadPlaygroundBtn);
+      modal.querySelectorAll("[data-modal-close]").forEach((btn) => {
+        if (!btn.hasAttribute("aria-label")) btn.setAttribute("aria-label", "Close dialog");
+        btn.addEventListener("click", closeModal);
       });
 
-      embedContainer.appendChild(iframe);
+      document.querySelectorAll("[data-modal-open='" + modal.id + "']").forEach((trigger) => {
+        trigger.addEventListener("click", openModal);
+      });
+
+      modal._openModal = openModal;
+      modal._closeModal = closeModal;
     });
-  }
 });

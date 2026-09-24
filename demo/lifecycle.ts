@@ -18,6 +18,23 @@ import * as readline from "node:readline";
 const STEP_MODE = process.argv.includes("--step");
 const CLEANUP_MODE = process.argv.includes("--cleanup");
 
+/**
+ * Resolve the Stellar transaction timeout (in seconds) from the
+ * --timeout-sec <N> CLI argument or the TX_TIMEOUT_SECS environment
+ * variable, defaulting to 60s for better reliability on testnet.
+ */
+function resolveTxTimeoutSecs(): number {
+  const flagIdx = process.argv.indexOf("--timeout-sec");
+  const raw =
+    flagIdx !== -1 && process.argv[flagIdx + 1] !== undefined
+      ? process.argv[flagIdx + 1]
+      : process.env.TX_TIMEOUT_SECS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
+}
+
+const TX_TIMEOUT_SECS = resolveTxTimeoutSecs();
+
 function pause(label: string): Promise<void> {
   if (!STEP_MODE) return Promise.resolve();
   return new Promise((resolve) => {
@@ -100,12 +117,13 @@ async function runCleanup(): Promise<void> {
 async function main() {
   if (STEP_MODE) log("--step mode enabled: will pause between phases");
   if (CLEANUP_MODE) log("--cleanup enabled: will return tokens after success");
+  log(`transaction timeout: ${TX_TIMEOUT_SECS}s`);
 
   await pause("about to start seller-agent");
   log("starting seller-agent...");
   const seller = spawn("npx", ["tsx", "seller-agent.ts"], {
     cwd: import.meta.dirname,
-    env: { ...process.env },
+    env: { ...process.env, TX_TIMEOUT_SECS: String(TX_TIMEOUT_SECS) },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -128,7 +146,7 @@ async function main() {
   log("running buyer-agent...");
   const buyer = spawn("npx", ["tsx", "buyer-agent.ts"], {
     cwd: import.meta.dirname,
-    env: { ...process.env },
+    env: { ...process.env, TX_TIMEOUT_SECS: String(TX_TIMEOUT_SECS) },
     stdio: ["ignore", "pipe", "pipe"],
   });
 

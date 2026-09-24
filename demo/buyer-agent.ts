@@ -17,6 +17,20 @@ const cfg: MarcConfig = {
   usdcToken: process.env.USDC_TOKEN_CONTRACT || TESTNET.usdcToken,
 };
 
+/**
+ * Resolve the Stellar transaction timeout (in seconds).
+ * Priority: --timeout-sec <N> CLI argument > TX_TIMEOUT_SECS env var > 60s default.
+ */
+function resolveTxTimeoutSecs(): number {
+  const argIdx = process.argv.indexOf("--timeout-sec");
+  const argVal = argIdx !== -1 ? process.argv[argIdx + 1] : undefined;
+  const raw = argVal ?? process.env.TX_TIMEOUT_SECS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
+}
+
+const txTimeoutSecs = resolveTxTimeoutSecs();
+
 const buyer = Keypair.fromSecret(process.env.BUYER_SECRET!);
 const sellerPubkey = process.env.SELLER_PUBKEY!;
 const sellerPort = Number(process.env.SELLER_PORT ?? 4402);
@@ -29,7 +43,8 @@ const pollConfig = {
 };
 
 console.log(`\n=== BUYER DEMO ===`);
-console.log(`Buyer: ${buyer.publicKey()}\n`);
+console.log(`Buyer: ${buyer.publicKey()}`);
+console.log(`Transaction timeout: ${txTimeoutSecs}s\n`);
 
 /**
  * Poll a condition with exponential backoff.
@@ -63,7 +78,7 @@ if (!agentId) {
     async () => {
       agentId = await identity.agentOf(buyer.publicKey());
       if (agentId) return true;
-      await identity.register(buyer, "ipfs://buyer-metadata.json");
+      await identity.register(buyer, "ipfs://buyer-metadata.json", { timeoutSecs: txTimeoutSecs });
       return false;
     },
     "buyer agent registration",
@@ -84,6 +99,7 @@ const jobId = await commerce.createJob(
   cfg.usdcToken,
   budget,
   "Generate report via x402-protected endpoint",
+  { timeoutSecs: txTimeoutSecs },
 );
 console.log(`[2] Job created — id=${jobId}, budget=1 USDC locked in escrow`);
 
@@ -98,7 +114,7 @@ await pollWithBackoff(
 );
 
 // Step 3: Call seller's paywalled API via marcFetch (auto-pays 402 with exponential backoff retry)
-const paidFetch = marcFetch({ signer: buyer, rpcUrl: cfg.rpcUrl });
+const paidFetch = marcFetch({ signer: buyer, rpcUrl: cfg.rpcUrl, timeoutSecs: txTimeoutSecs });
 console.log(`[3] Calling seller API with auto-pay…`);
 let res: Response | undefined;
 await pollWithBackoff(
@@ -118,7 +134,7 @@ const data = await res!.json();
 console.log(`    Response: ${JSON.stringify(data)}`);
 
 // Step 4: Complete job (buyer=evaluator) → triggers 99/1 split
-await commerce.complete(buyer, jobId);
+await commerce.complete(buyer, jobId, { timeoutSecs: txTimeoutSecs });
 
 // Poll until the job status flips to "completed"
 await pollWithBackoff(
