@@ -198,3 +198,8 @@ const result = await marcFetch("https://agent.example/api/summarize", {
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-602 -->
+- #602: [Feature] Add Open Graph and Twitter Card social metadata to landing/index.html
