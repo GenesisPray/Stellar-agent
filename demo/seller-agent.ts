@@ -18,6 +18,21 @@ const cfg: MarcConfig = {
   usdcToken: process.env.USDC_TOKEN_CONTRACT || TESTNET.usdcToken,
 };
 
+/**
+ * Transaction timeout in seconds.
+ *
+ * Configurable via the TX_TIMEOUT_SECS env var or the `--timeout-sec <N>` CLI
+ * argument. Defaults to 60s to tolerate testnet congestion and ledger latency.
+ */
+const readTimeoutSecs = (): number => {
+  const argIdx = process.argv.indexOf("--timeout-sec");
+  const raw = argIdx !== -1 ? process.argv[argIdx + 1] : process.env.TX_TIMEOUT_SECS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 60;
+};
+
+const txTimeoutSecs = readTimeoutSecs();
+
 const seller = Keypair.fromSecret(process.env.SELLER_SECRET!);
 
 const jobIdRaw = process.env.JOB_ID;
@@ -44,6 +59,7 @@ const servicePrice: string = getServicePrice();
 
 console.log(`\n=== SELLER DEMO ===`);
 console.log(`Seller: ${seller.publicKey()}`);
+console.log(`Transaction timeout: ${txTimeoutSecs}s (TX_TIMEOUT_SECS or --timeout-sec)`);
 console.log(
   `Default service price: ${servicePrice} (configurable via SELLER_SERVICE_PRICE env var or ?price= query param)\n`,
 );
@@ -52,7 +68,7 @@ console.log(
 const identity = new IdentityClient(cfg);
 let agentId = await identity.agentOf(seller.publicKey());
 if (!agentId) {
-  agentId = await identity.register(seller, "ipfs://seller-metadata.json");
+  agentId = await identity.register(seller, "ipfs://seller-metadata.json", { timeoutSecs: txTimeoutSecs });
   console.log(`[1] Registered on-chain as agent #${agentId}`);
 } else {
   console.log(`[1] Already registered as agent #${agentId}`);
@@ -86,7 +102,7 @@ app.listen(port, () => console.log(`[2] Paywall API listening on :${port}`));
 // Step 3: Submit deliverable once JOB_ID is set
 if (jobId) {
   const commerce = new CommerceClient(cfg);
-  await commerce.submit(seller, BigInt(jobId), "ipfs://work-results.json");
+  await commerce.submit(seller, BigInt(jobId), "ipfs://work-results.json", { timeoutSecs: txTimeoutSecs });
   console.log(`[3] Deliverable submitted for job ${jobId}`);
   console.log(`    Awaiting evaluator approval…\n`);
   console.log(`=== SELLER DONE ===\n`);
