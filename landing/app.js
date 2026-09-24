@@ -238,201 +238,99 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ── Mobile hamburger toggle ──
   const hamburger = document.getElementById("hamburger");
-  const navLinksContainer = document.getElementById("nav-links");
-  hamburger?.addEventListener("click", () => {
-    const open = navLinksContainer.classList.toggle("nav-open");
-    hamburger.setAttribute("aria-expanded", String(open));
-  });
-  navLinksContainer?.querySelectorAll(".nav-link").forEach((link) => {
-    link.addEventListener("click", () => {
-      navLinksContainer.classList.remove("nav-open");
-      hamburger?.setAttribute("aria-expanded", "false");
+  const mobileMenu = document.getElementById("mobile-menu");
+  if (hamburger && mobileMenu) {
+    const setMenuState = (open) => {
+      mobileMenu.classList.toggle("open", open);
+      hamburger.classList.toggle("active", open);
+      hamburger.setAttribute("aria-expanded", String(open));
+      hamburger.setAttribute("aria-controls", "mobile-menu");
+      hamburger.setAttribute("aria-label", open ? "Close navigation menu" : "Open navigation menu");
+    };
+    setMenuState(false);
+    hamburger.addEventListener("click", () => {
+      setMenuState(!mobileMenu.classList.contains("open"));
     });
-  });
+  }
 
-  // ── Live contract addresses (issue #304) ──
-  // Fetch from the /api/contract-addresses serverless endpoint and populate
-  // the contract cards. Falls back silently to the hardcoded values already
-  // in the HTML if the endpoint is unavailable.
-  const CONTRACT_KEYS = {
-    agent_identity: "CAMPXYFZJTIPEVOPOAZPRG5OHXKNBDPGTPRCOIO4LVPGEM4TONPY65A5",
-    agentic_commerce: "CD2KWU7IE74Z2QKVP3FQ67J46XHNMGIDTNKXVWE7ZNVRC7T6UH46GQXE",
-  };
+  // ── Modal accessibility (issue #601) ──
+  // Adds dialog semantics, Escape-to-close, focus trapping while open, and
+  // focus restoration to the trigger element on close.
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-  async function loadContractAddresses() {
-    try {
-      const res = await fetch("/api/contract-addresses");
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!data?.contracts) return;
+  document.querySelectorAll("[data-modal]")
+    .forEach((modal) => {
+      const dialog = modal.querySelector("[role='dialog']") || modal;
+      const labelledBy = dialog.getAttribute("aria-labelledby");
+      if (!dialog.hasAttribute("role")) dialog.setAttribute("role", "dialog");
+      dialog.setAttribute("aria-modal", "true");
+      if (!labelledBy) {
+        const heading = dialog.querySelector("h1, h2, h3, [data-modal-title]");
+        if (heading) {
+          if (!heading.id) heading.id = "modal-title-" + Math.random().toString(36).slice(2, 8);
+          dialog.setAttribute("aria-labelledby", heading.id);
+        }
+      }
 
-      const cardMap = {
-        agent_identity: document.querySelector('[data-contract="agent_identity"]'),
-        agentic_commerce: document.querySelector('[data-contract="agentic_commerce"]'),
+      let lastFocused = null;
+
+      const getFocusable = () =>
+        Array.from(dialog.querySelectorAll(FOCUSABLE)).filter(
+          (el) => el.offsetParent !== null || el === document.activeElement,
+        );
+
+      const onKeydown = (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeModal();
+          return;
+        }
+        if (event.key !== "Tab") return;
+        const focusable = getFocusable();
+        if (focusable.length === 0) {
+          event.preventDefault();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
       };
 
-      for (const [key, card] of Object.entries(cardMap)) {
-        const info = data.contracts[key];
-        if (!card || !info?.address) continue;
-        const btn = card.querySelector(".contract-addr");
-        const code = card.querySelector(".contract-addr code");
-        const full = card.querySelector(".contract-addr-full");
-        const explorerLink = card.querySelector(".contract-explorer");
-        if (btn) btn.dataset.address = info.address;
-        if (code) code.textContent = info.address.slice(0, 4) + "..." + info.address.slice(-6);
-        if (full) full.textContent = info.address;
-        if (explorerLink && info.explorer) explorerLink.href = info.explorer;
+      function openModal() {
+        lastFocused = document.activeElement;
+        modal.classList.add("open");
+        modal.setAttribute("aria-hidden", "false");
+        document.addEventListener("keydown", onKeydown);
+        const focusable = getFocusable();
+        (focusable[0] || dialog).focus();
       }
 
-      // Mark cards as live-loaded for visibility
-      document.querySelectorAll(".contracts-grid [data-contract]").forEach((c) => {
-        c.classList.add("contracts-live");
+      function closeModal() {
+        modal.classList.remove("open");
+        modal.setAttribute("aria-hidden", "true");
+        document.removeEventListener("keydown", onKeydown);
+        if (lastFocused && typeof lastFocused.focus === "function") {
+          lastFocused.focus();
+        }
+      }
+
+      modal.querySelectorAll("[data-modal-close]").forEach((btn) => {
+        if (!btn.hasAttribute("aria-label")) btn.setAttribute("aria-label", "Close dialog");
+        btn.addEventListener("click", closeModal);
       });
-    } catch {
-      // Silently fall back to static values
-    }
-  }
 
-  loadContractAddresses();
+      document.querySelectorAll("[data-modal-open='" + modal.id + "']").forEach((trigger) => {
+        trigger.addEventListener("click", openModal);
+      });
 
-  // ── Animated Protocol Stack Diagram (issue #303) ──
-  const canvas = document.getElementById("protocol-diagram");
-  if (canvas && canvas.getContext) {
-    const ctx = canvas.getContext("2d");
-    const DPR = window.devicePixelRatio || 1;
-
-    function resizeCanvas() {
-      const rect = canvas.parentElement.getBoundingClientRect();
-      canvas.width = rect.width * DPR;
-      canvas.height = 280 * DPR;
-      canvas.style.width = rect.width + "px";
-      canvas.style.height = "280px";
-      ctx.scale(DPR, DPR);
-    }
-    resizeCanvas();
-    window.addEventListener("resize", () => {
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      resizeCanvas();
+      modal._openModal = openModal;
+      modal._closeModal = closeModal;
     });
-
-    const LAYERS = [
-      { label: "Agent Identity", sublabel: "ERC-8004 · Register", color: "#F97316", y: 40 },
-      {
-        label: "Agentic Commerce",
-        sublabel: "ERC-8183 · Escrow & Settle",
-        color: "#FB923C",
-        y: 120,
-      },
-      { label: "x402 / MPP", sublabel: "HTTP 402 · Micropayments", color: "#FED7AA", y: 200 },
-    ];
-
-    const ARROW_COLOR = "#F97316";
-    let tick = 0;
-    let animationId;
-    let diagramVisible = false;
-
-    const diagramObserver = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting && !diagramVisible) {
-            diagramVisible = true;
-            tick = 0;
-            drawLoop();
-          }
-        });
-      },
-      { threshold: 0.2 },
-    );
-    diagramObserver.observe(canvas);
-
-    function easeOutCubic(t) {
-      return 1 - Math.pow(1 - t, 3);
-    }
-
-    function drawLayer(layer, progress, w) {
-      const boxH = 60;
-      const boxW = Math.min(w - 48, 640);
-      const x = (w - boxW) / 2;
-      const y = layer.y;
-      const alpha = easeOutCubic(Math.min(progress, 1));
-      const slideX = (1 - alpha) * -24;
-
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.translate(slideX, 0);
-
-      // Card background
-      ctx.beginPath();
-      ctx.roundRect(x, y, boxW, boxH, 10);
-      ctx.fillStyle = "#fff";
-      ctx.shadowColor = "rgba(249,115,22,0.12)";
-      ctx.shadowBlur = 16;
-      ctx.fill();
-      ctx.shadowBlur = 0;
-
-      // Left accent bar
-      ctx.beginPath();
-      ctx.roundRect(x, y, 4, boxH, [10, 0, 0, 10]);
-      ctx.fillStyle = layer.color;
-      ctx.fill();
-
-      // Label
-      ctx.fillStyle = "#0A0A0A";
-      ctx.font = "600 15px Inter, system-ui, sans-serif";
-      ctx.fillText(layer.label, x + 20, y + 26);
-
-      // Sublabel
-      ctx.fillStyle = "#6B7280";
-      ctx.font = "400 12px Inter, system-ui, sans-serif";
-      ctx.fillText(layer.sublabel, x + 20, y + 44);
-
-      ctx.restore();
-    }
-
-    function drawArrow(fromY, toY, progress, w) {
-      const alpha = easeOutCubic(Math.min(progress, 1));
-      if (alpha <= 0) return;
-      const cx = w / 2;
-      const startY = fromY + 60;
-      const endY = toY;
-      const currentY = startY + (endY - startY) * alpha;
-
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.strokeStyle = ARROW_COLOR;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(cx, startY);
-      ctx.lineTo(cx, currentY);
-      ctx.stroke();
-
-      if (alpha > 0.9) {
-        ctx.beginPath();
-        ctx.moveTo(cx - 5, endY - 8);
-        ctx.lineTo(cx, endY);
-        ctx.lineTo(cx + 5, endY - 8);
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
-
-    function drawLoop() {
-      const w = canvas.width / DPR;
-      ctx.clearRect(0, 0, w, 280);
-
-      const t = tick / 60;
-      LAYERS.forEach((layer, i) => {
-        const progress = (t - i * 0.35) / 0.6;
-        drawLayer(layer, progress, w);
-      });
-
-      drawArrow(LAYERS[0].y, LAYERS[1].y, (t - 0.5) / 0.5, w);
-      drawArrow(LAYERS[1].y, LAYERS[2].y, (t - 0.9) / 0.5, w);
-
-      tick++;
-      if (t < 2.2) {
-        animationId = requestAnimationFrame(drawLoop);
-      }
-    }
-  }
 });
