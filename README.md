@@ -203,3 +203,6 @@ MIT
 
 <!-- handsoff-issue-602 -->
 - #602: [Feature] Add Open Graph and Twitter Card social metadata to landing/index.html
+
+<!-- handsoff-issue-603 -->
+- #603: [Feature] Add JSON-LD structured data for SoftwareApplication schema to landing page
