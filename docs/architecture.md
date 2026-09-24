@@ -12,8 +12,9 @@ Bear Protocol is a 3-layer commerce stack that gives AI agents on-chain identity
 4. [Agent Communication Flow](#agent-communication-flow)
 5. [Dashboard Request Flow](#dashboard-request-flow-freighter-vs-server-keypair)
 6. [x402 Micropayment Lifecycle](#x402-micropayment-lifecycle)
-7. [Dependency Graph](#dependency-graph)
-8. [Data Model](#data-model)
+7. [Layer Sequence Diagrams](#layer-sequence-diagrams)
+8. [Dependency Graph](#dependency-graph)
+9. [Data Model](#data-model)
 
 ---
 
@@ -214,6 +215,121 @@ sequenceDiagram
     Facilitator->>Stellar: Submit payment transaction
     Stellar-->>Facilitator: Transaction confirmed (ledger close)
     Facilitator-->>Server: Settlement confirmation (txHash)
+    Server-->>Client: 200 OK<br/>{ response body }
+```
+
+---
+
+## Layer Sequence Diagrams
+
+End-to-end sequence diagrams for each of the three protocol layers, showing how the Buyer, Seller, Soroban smart contracts, and x402 Facilitators interact.
+
+### Layer 1: Identity Registration & Deregistration
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent as Agent<br/>(Buyer / Seller)
+    participant Identity as agent-identity<br/>contract
+    participant RPC as Soroban RPC
+
+    Note over Agent,RPC: Registration
+    Agent->>RPC: simulateTransaction(register(owner, uri))
+    RPC-->>Agent: simulation result (footprint, fees)
+    Agent->>Agent: sign transaction envelope
+    Agent->>RPC: sendTransaction(signed register)
+    RPC->>Identity: register(owner, uri)
+    Identity->>Identity: assert owner not already registered
+    Identity->>Identity: store address → agentId, uri, active = true
+    Identity-->>RPC: agentId
+    RPC-->>Agent: tx hash + agentId
+
+    Note over Agent,RPC: Lookup
+    Agent->>RPC: simulateTransaction(agentOf(address))
+    RPC->>Identity: agentOf(address)
+    Identity-->>RPC: agentId or null
+    RPC-->>Agent: agentId or null
+
+    Note over Agent,RPC: Deregistration
+    Agent->>RPC: sendTransaction(deregister(owner))
+    RPC->>Identity: deregister(owner)
+    Identity->>Identity: assert caller == owner
+    Identity->>Identity: set active = false
+    Identity-->>RPC: ok
+    RPC-->>Agent: tx hash
+```
+
+### Layer 2: Job Escrow Lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Buyer as Buyer Agent<br/>(client)
+    participant Commerce as agentic-commerce<br/>contract
+    participant Token as MUSD Token<br/>(SAC)
+    participant Seller as Seller Agent<br/>(provider)
+    participant Evaluator as Evaluator
+
+    Note over Buyer,Evaluator: Funded
+    Buyer->>Token: approve(commerce, budget)
+    Buyer->>Commerce: create_job(provider, evaluator, token, budget, desc)
+    Commerce->>Token: transfer(buyer → escrow)
+    Commerce-->>Buyer: jobId (status = Funded)
+
+    Note over Buyer,Evaluator: Submitted
+    Seller->>Commerce: submit(jobId, deliverableUri)
+    Commerce->>Commerce: assert status == Funded
+    Commerce-->>Seller: ok (status = Submitted)
+
+    alt Completed
+        Buyer->>Commerce: complete(jobId)
+        Commerce->>Commerce: assert status == Submitted
+        Commerce->>Token: transfer(escrow → seller 99%)
+        Commerce->>Token: transfer(escrow → treasury 1%)
+        Commerce-->>Buyer: ok (status = Completed)
+    else Cancelled
+        Buyer->>Commerce: cancel(jobId)
+        Commerce->>Commerce: assert status == Funded
+        Commerce->>Token: transfer(escrow → buyer, full refund)
+        Commerce-->>Buyer: ok (status = Cancelled)
+    else Disputed
+        Buyer->>Commerce: dispute(jobId)
+        Commerce->>Commerce: assert status == Submitted
+        Commerce-->>Buyer: ok (status = Disputed)
+        Evaluator->>Commerce: resolve(jobId, outcome)
+        Commerce->>Token: transfer(escrow → seller or buyer)
+        Commerce-->>Evaluator: ok (status = Resolved)
+    end
+```
+
+### Layer 3: HTTP 402 Micropayment Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as Client<br/>(marcFetch)
+    participant Server as Server<br/>(marcPaywall)
+    participant Facilitator as Facilitator<br/>(@x402/stellar)
+    participant Stellar as Stellar Network
+
+    Note over Client,Stellar: Request
+    Client->>Server: GET /api/resource (no payment header)
+
+    Note over Client,Stellar: 402 Challenge
+    Server-->>Client: 402 Payment Required<br/>{ price, token, payTo, network }
+
+    Note over Client,Stellar: Sign
+    Client->>Client: build Stellar payment transaction
+    Client->>Client: sign transaction → XDR envelope
+
+    Note over Client,Stellar: X-Payment
+    Client->>Server: GET /api/resource<br/>X-PAYMENT: <signed XDR>
+    Server->>Facilitator: verify(signedXDR, paymentRequirements)
+    Facilitator->>Stellar: submit payment transaction
+    Stellar-->>Facilitator: confirmed (ledger close)
+    Facilitator-->>Server: settlement confirmation (txHash)
+
+    Note over Client,Stellar: 200 OK
     Server-->>Client: 200 OK<br/>{ response body }
 ```
 

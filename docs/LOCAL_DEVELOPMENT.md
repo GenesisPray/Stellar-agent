@@ -203,9 +203,83 @@ docker stop stellar-local
 | `cargo build` fails with `wasm32-unknown-unknown` target missing | `rustup target add wasm32-unknown-unknown` |
 | Contract invoke error `HostError: Value not found` | Contract not initialized. Run the `initialize` invoke from step 4. |
 
+## Frequently Asked Questions & Troubleshooting
+
+### How do I get testnet USDC from the Circle faucet?
+
+Circle runs a USDC faucet for Stellar testnet. Fund a testnet account first (via
+[Friendbot](https://friendbot.stellar.org)), then request testnet USDC from the
+[Circle USDC faucet](https://faucet.circle.com) by pasting your Stellar testnet public key.
+
+```bash
+# 1. Fund the account with testnet XLM
+curl "https://friendbot.stellar.org?addr=$(stellar keys address admin)"
+
+# 2. Request testnet USDC at https://faucet.circle.com using the same public key
+```
+
+Once funded, verify the balance on
+[Stellar Expert (testnet)](https://stellar.expert/explorer/testnet) by searching your public key.
+
+### Why does the OpenZeppelin facilitator require the canonical USDC SAC?
+
+The OpenZeppelin facilitator settles payments against the **canonical USDC Stellar Asset Contract (SAC)**
+for the network. If you point `USDC_TOKEN` at a custom or locally deployed token, the facilitator
+cannot match the asset it expects and settlement fails. Always use the canonical USDC SAC address
+for the network you are targeting:
+
+| Network | Canonical USDC SAC |
+|---------|--------------------|
+| Testnet | `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` |
+| Mainnet | `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` |
+
+> **Note:** On a local standalone network there is no canonical USDC, so deploy your own SAC and
+> set `USDC_TOKEN` to that address (see step 4).
+
+### How do I switch Freighter to Stellar Testnet?
+
+1. Open the Freighter browser extension.
+2. Click the network selector at the top of the popup.
+3. Choose **Testnet** (or **Futurenet** if you are testing there).
+4. Confirm the network passphrase shown matches `Test SDF Network ; September 2015`.
+
+If your agent still reports a network mismatch, make sure `NETWORK_PASSPHRASE` in your `.env`
+matches the network selected in Freighter, then restart the agent.
+
+### How do I resolve `tx failed: txINTERNAL_ERROR`?
+
+`txINTERNAL_ERROR` is a generic Soroban RPC failure. Work through these checks in order:
+
+1. **Network mismatch** — the RPC URL, network passphrase, and Freighter network must all agree.
+2. **Unfunded account** — fund the source account with Friendbot (testnet) or the local faucet.
+3. **Stale sequence number** — retry the transaction; the SDK re-fetches the sequence automatically.
+4. **Contract not initialized** — run the `initialize` invoke (see step 4).
+5. **Insufficient USDC** — confirm the payer holds the canonical USDC SAC balance.
+
+Inspect the failing transaction on [Stellar Expert (testnet)](https://stellar.expert/explorer/testnet)
+to see the exact ledger error.
+
+### How do I reset local agent caches?
+
+Agents cache identity and listing state between runs. To start clean:
+
+```bash
+# Stop running agents first, then clear caches
+rm -rf agents/*/.cache agents/*/node_modules/.cache
+
+# Optional: wipe the whole local chain state
+docker stop stellar-local
+```
+
+After clearing caches, re-run `./start-agents.sh` and the buyer agent. If you also stopped the
+Docker container, re-deploy the contracts from step 4 before restarting.
+
 ## Further Reading
 
 - [Stellar Quickstart Docker image](https://github.com/stellar/quickstart)
 - [Soroban documentation](https://developers.stellar.org/docs/build/smart-contracts/overview)
 - [stellar-cli reference](https://developers.stellar.org/docs/tools/developer-tools/cli/stellar-cli)
+- [Stellar Expert — testnet explorer](https://stellar.expert/explorer/testnet)
+- [Stellar Laboratory — testnet](https://lab.stellar.org)
+- [Circle USDC faucet](https://faucet.circle.com)
 - [MAINNET_MIGRATION.md](./MAINNET_MIGRATION.md) — checklist before going to production

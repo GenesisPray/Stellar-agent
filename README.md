@@ -208,3 +208,8 @@ const result = await marcFetch("https://agent.example/api/summarize", {
 ## License
 
 MIT
+
+## Handsoff notes
+
+<!-- handsoff-issue-618 -->
+- #618: [Security] Add Content Security Policy headers configuration in dashboard/server.ts
