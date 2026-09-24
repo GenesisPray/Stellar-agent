@@ -1,6 +1,6 @@
 // Bear on Stellar — Landing Page
 // Scroll reveals, copy-to-clipboard, mobile nav, contract address loading,
-// animated protocol stack diagram
+// animated protocol stack diagram, interactive SDK snippet viewer
 
 document.addEventListener("DOMContentLoaded", () => {
   // ── Dashboard link base URL ──
@@ -75,26 +75,166 @@ document.addEventListener("DOMContentLoaded", () => {
   document.body.appendChild(toast);
 
   let toastTimeout;
+  function showToast(message) {
+    toast.textContent = message || "Copied!";
+    toast.classList.add("show");
+    clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => toast.classList.remove("show"), 1500);
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;opacity:0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+  }
+
   document.querySelectorAll(".contract-addr").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const addr = btn.dataset.address;
       if (!addr) return;
-      try {
-        await navigator.clipboard.writeText(addr);
-      } catch {
-        const ta = document.createElement("textarea");
-        ta.value = addr;
-        ta.style.cssText = "position:fixed;opacity:0";
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand("copy");
-        ta.remove();
-      }
-      toast.classList.add("show");
-      clearTimeout(toastTimeout);
-      toastTimeout = setTimeout(() => toast.classList.remove("show"), 1500);
+      await copyText(addr);
+      showToast("Copied!");
     });
   });
+
+  // ── Interactive SDK snippet viewer (issue #600) ──
+  // Renders the selected use-case snippet with lightweight syntax
+  // highlighting and a one-click copy button with tooltip feedback.
+  const SNIPPETS = {
+    identity: {
+      label: "Identity",
+      code: [
+        "import { MarcClient } from 'marc-stellar-sdk';\n",
+        "\n",
+        "const client = new MarcClient({ network: 'testnet' });\n",
+        "\n",
+        "// Register an agent identity (ERC-8004)\n",
+        "const agent = await client.identity.register({\n",
+        "  name: 'research-agent',\n",
+        "  capabilities: ['search', 'summarize'],\n",
+        "  metadataUri: 'ipfs://bafy...',\n",
+        "});\n",
+        "\n",
+        "console.log('Agent registered:', agent.id);\n",
+      ].join(""),
+    },
+    escrow: {
+      label: "Escrow Job",
+      code: [
+        "import { MarcClient } from 'marc-stellar-sdk';\n",
+        "\n",
+        "const client = new MarcClient({ network: 'testnet' });\n",
+        "\n",
+        "// Create an escrow-backed job (ERC-8183)\n",
+        "const job = await client.jobs.create({\n",
+        "  provider: 'G...PROVIDER',\n",
+        "  amount: '100',\n",
+        "  asset: 'USDC',\n",
+        "  deadline: Math.floor(Date.now() / 1000) + 3600,\n",
+        "});\n",
+        "\n",
+        "await job.fund();\n",
+        "console.log('Job funded:', job.id);\n",
+      ].join(""),
+    },
+    x402: {
+      label: "x402 Paywall",
+      code: [
+        "import { MarcClient } from 'marc-stellar-sdk';\n",
+        "\n",
+        "const client = new MarcClient({ network: 'testnet' });\n",
+        "\n",
+        "// Gate an endpoint behind an x402 paywall\n",
+        "const paywall = client.x402.paywall({\n",
+        "  price: '0.01',\n",
+        "  asset: 'USDC',\n",
+        "  payTo: 'G...MERCHANT',\n",
+        "});\n",
+        "\n",
+        "app.get('/premium', paywall, (req, res) => {\n",
+        "  res.json({ data: 'paid content' });\n",
+        "});\n",
+      ].join(""),
+    },
+    fetch: {
+      label: "Fetch with Payment",
+      code: [
+        "import { MarcClient } from 'marc-stellar-sdk';\n",
+        "\n",
+        "const client = new MarcClient({ network: 'testnet' });\n",
+        "\n",
+        "// Automatically settle HTTP 402 challenges\n",
+        "const res = await client.x402.fetch('https://api.example.com/premium', {\n",
+        "  method: 'GET',\n",
+        "  maxAmount: '0.05',\n",
+        "});\n",
+        "\n",
+        "const data = await res.json();\n",
+        "console.log('Paid response:', data);\n",
+      ].join(""),
+    },
+  };
+
+  const snippetViewer = document.querySelector("[data-snippet-viewer]");
+  if (snippetViewer) {
+    const tabs = snippetViewer.querySelectorAll("[data-snippet-tab]");
+    const codeEl = snippetViewer.querySelector("[data-snippet-code]");
+    const copyBtn = snippetViewer.querySelector("[data-snippet-copy]");
+    const tooltip = snippetViewer.querySelector("[data-snippet-tooltip]");
+    let activeKey = tabs[0]?.dataset.snippetTab || "identity";
+
+    // Minimal tokenizer: comments, strings, keywords, numbers.
+    function highlight(code) {
+      const escaped = code
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      return escaped
+        .replace(/(\/\/[^\n]*)/g, '<span class="tok-comment">$1</span>')
+        .replace(/(&#39;|')([^'\n]*)(&#39;|')/g, '<span class="tok-string">$1$2$3</span>')
+        .replace(/\b(import|from|const|await|async|new|return|console)\b/g, '<span class="tok-keyword">$1</span>')
+        .replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="tok-number">$1</span>');
+    }
+
+    function renderSnippet(key) {
+      const snippet = SNIPPETS[key];
+      if (!snippet || !codeEl) return;
+      activeKey = key;
+      codeEl.innerHTML = highlight(snippet.code);
+      tabs.forEach((tab) => {
+        const isActive = tab.dataset.snippetTab === key;
+        tab.classList.toggle("active", isActive);
+        tab.setAttribute("aria-selected", String(isActive));
+      });
+    }
+
+    tabs.forEach((tab) => {
+      tab.addEventListener("click", () => renderSnippet(tab.dataset.snippetTab));
+    });
+
+    let tooltipTimeout;
+    copyBtn?.addEventListener("click", async () => {
+      const snippet = SNIPPETS[activeKey];
+      if (!snippet) return;
+      await copyText(snippet.code);
+      if (tooltip) {
+        tooltip.classList.add("show");
+        clearTimeout(tooltipTimeout);
+        tooltipTimeout = setTimeout(() => tooltip.classList.remove("show"), 1500);
+      }
+      showToast("Copied!");
+    });
+
+    renderSnippet(activeKey);
+  }
 
   // ── Mobile hamburger toggle ──
   const hamburger = document.getElementById("hamburger");
@@ -243,189 +383,56 @@ document.addEventListener("DOMContentLoaded", () => {
 
       // Sublabel
       ctx.fillStyle = "#6B7280";
-      ctx.font = "500 12px Inter, system-ui, sans-serif";
-      ctx.fillText(layer.sublabel, x + 20, y + 46);
-
-      // Right color chip
-      const chipW = 56;
-      const chipX = x + boxW - chipW - 14;
-      const chipY = y + 18;
-      ctx.beginPath();
-      ctx.roundRect(chipX, chipY, chipW, 22, 11);
-      ctx.fillStyle = layer.color + "22";
-      ctx.fill();
-      ctx.fillStyle = layer.color;
-      ctx.font = "600 11px Inter, system-ui, sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText("LIVE", chipX + chipW / 2, chipY + 14.5);
-      ctx.textAlign = "left";
+      ctx.font = "400 12px Inter, system-ui, sans-serif";
+      ctx.fillText(layer.sublabel, x + 20, y + 44);
 
       ctx.restore();
     }
 
-    function drawArrow(fromY, progress, w) {
-      if (progress <= 0) return;
-      const boxW = Math.min(w - 48, 640);
-      const x = w / 2;
-      const startY = fromY + 60;
-      const endY = fromY + 78;
+    function drawArrow(fromY, toY, progress, w) {
       const alpha = easeOutCubic(Math.min(progress, 1));
+      if (alpha <= 0) return;
+      const cx = w / 2;
+      const startY = fromY + 60;
+      const endY = toY;
+      const currentY = startY + (endY - startY) * alpha;
 
       ctx.save();
       ctx.globalAlpha = alpha;
       ctx.strokeStyle = ARROW_COLOR;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.moveTo(x, startY);
-      ctx.lineTo(x, endY);
+      ctx.moveTo(cx, startY);
+      ctx.lineTo(cx, currentY);
       ctx.stroke();
-      ctx.setLineDash([]);
 
-      // Arrowhead
-      ctx.fillStyle = ARROW_COLOR;
-      ctx.beginPath();
-      ctx.moveTo(x, endY + 6);
-      ctx.lineTo(x - 5, endY);
-      ctx.lineTo(x + 5, endY);
-      ctx.closePath();
-      ctx.fill();
+      if (alpha > 0.9) {
+        ctx.beginPath();
+        ctx.moveTo(cx - 5, endY - 8);
+        ctx.lineTo(cx, endY);
+        ctx.lineTo(cx + 5, endY - 8);
+        ctx.stroke();
+      }
       ctx.restore();
     }
 
-    // Pulse animation on the LIVE chips
-    function drawPulse(w) {
-      const pulse = (Math.sin(tick * 0.05) + 1) / 2; // 0..1
-      LAYERS.forEach((layer) => {
-        const boxW = Math.min(w - 48, 640);
-        const x = (w - boxW) / 2;
-        const chipW = 56;
-        const chipX = x + boxW - chipW - 14;
-        const chipY = layer.y + 18;
-        ctx.save();
-        ctx.globalAlpha = 0.35 * pulse;
-        ctx.beginPath();
-        ctx.roundRect(chipX, chipY, chipW, 22, 11);
-        ctx.fillStyle = layer.color;
-        ctx.fill();
-        ctx.restore();
-      });
-    }
-
-    const PHASE_DURATION = 22; // frames per layer reveal
-
     function drawLoop() {
-      tick++;
       const w = canvas.width / DPR;
-      const h = canvas.height / DPR;
+      ctx.clearRect(0, 0, w, 280);
 
-      ctx.clearRect(0, 0, w, h);
-
+      const t = tick / 60;
       LAYERS.forEach((layer, i) => {
-        const start = i * PHASE_DURATION;
-        const progress = (tick - start) / PHASE_DURATION;
+        const progress = (t - i * 0.35) / 0.6;
         drawLayer(layer, progress, w);
-
-        if (i < LAYERS.length - 1) {
-          const arrowStart = start + PHASE_DURATION * 0.6;
-          drawArrow(layer.y, (tick - arrowStart) / (PHASE_DURATION * 0.4), w);
-        }
       });
 
-      const fullyLoaded = tick > LAYERS.length * PHASE_DURATION;
-      if (fullyLoaded) {
-        drawPulse(w);
-      }
+      drawArrow(LAYERS[0].y, LAYERS[1].y, (t - 0.5) / 0.5, w);
+      drawArrow(LAYERS[1].y, LAYERS[2].y, (t - 0.9) / 0.5, w);
 
-      animationId = requestAnimationFrame(drawLoop);
+      tick++;
+      if (t < 2.2) {
+        animationId = requestAnimationFrame(drawLoop);
+      }
     }
-  }
-
-  // ── Try It playground — StackBlitz embed (issue #305) ──
-  const playgroundSection = document.getElementById("try-it");
-  const embedContainer = document.getElementById("stackblitz-embed");
-  const loadPlaygroundBtn = document.getElementById("load-playground");
-
-  if (loadPlaygroundBtn && embedContainer) {
-    loadPlaygroundBtn.addEventListener("click", () => {
-      loadPlaygroundBtn.disabled = true;
-      loadPlaygroundBtn.textContent = "Loading…";
-
-      // StackBlitz embed: open a pre-configured Node.js project demonstrating
-      // the marc-stellar-sdk. The project URL encodes the files as query params
-      // so no backend is needed — everything runs in the browser sandbox.
-      const sbFiles = {
-        "index.js": [
-          "// Bear Protocol — marc-stellar-sdk browser playground",
-          "// Edit and run this file to explore the SDK.",
-          "",
-          "import { IdentityClient, CommerceClient, TESTNET } from 'marc-stellar-sdk';",
-          "import { Keypair } from '@stellar/stellar-sdk';",
-          "",
-          "const config = {",
-          "  rpcUrl: TESTNET.rpcUrl,",
-          "  networkPassphrase: TESTNET.networkPassphrase,",
-          "  identityContract: TESTNET.identityContract,",
-          "  commerceContract: TESTNET.commerceContract,",
-          "  usdcToken: TESTNET.usdcToken,",
-          "};",
-          "",
-          "console.log('TESTNET config:', config);",
-          "",
-          "// -- Register an agent identity --",
-          "// const keypair = Keypair.random();",
-          "// const identity = new IdentityClient(config);",
-          "// const agentId = await identity.register(keypair, 'https://ipfs.example/metadata.json');",
-          "// console.log('Registered agent:', agentId);",
-          "",
-          "// -- Create an escrow job --",
-          "// const commerce = new CommerceClient(config);",
-          "// const jobId = await commerce.createJob(",
-          "//   keypair, provider, evaluator, config.usdcToken, 10_000_000n, 'Analyze data'",
-          "// );",
-          "// console.log('Job created:', jobId);",
-        ].join("\n"),
-        "package.json": JSON.stringify(
-          {
-            name: "bear-protocol-playground",
-            version: "1.0.0",
-            type: "module",
-            dependencies: {
-              "marc-stellar-sdk": "latest",
-              "@stellar/stellar-sdk": "^12.0.0",
-            },
-          },
-          null,
-          2,
-        ),
-      };
-
-      // Build StackBlitz URL with embedded files
-      const params = new URLSearchParams();
-      params.set("title", "Bear Protocol Playground");
-      params.set("description", "marc-stellar-sdk interactive playground");
-      params.set("template", "node");
-      for (const [filename, content] of Object.entries(sbFiles)) {
-        params.set(`files[${filename}]`, content);
-      }
-      params.set("embed", "1");
-      params.set("view", "editor");
-      params.set("theme", "light");
-      params.set("hideNavigation", "1");
-
-      const iframe = document.createElement("iframe");
-      iframe.src = `https://stackblitz.com/run?${params.toString()}`;
-      iframe.title = "Bear Protocol SDK Playground";
-      iframe.allow = "cross-origin-isolated";
-      iframe.loading = "lazy";
-      iframe.className = "playground-iframe";
-      iframe.setAttribute("aria-label", "Interactive SDK playground powered by StackBlitz");
-
-      iframe.addEventListener("load", () => {
-        loadPlaygroundBtn.parentElement?.removeChild(loadPlaygroundBtn);
-      });
-
-      embedContainer.appendChild(iframe);
-    });
   }
 });
