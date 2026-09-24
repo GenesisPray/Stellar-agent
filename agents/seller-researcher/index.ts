@@ -1,30 +1,29 @@
 import "dotenv/config";
 import fs from "node:fs";
 import path from "node:path";
-import express from "express";
+import { fileURLToPath } from "node:url";
 import rateLimit from "express-rate-limit";
 import Groq from "groq-sdk";
-import { Keypair } from "@stellar/stellar-sdk";
-import { IdentityClient, CommerceClient, TESTNET, type MarcConfig } from "marc-stellar-sdk";
-import { retryWithBackoff, startHeartbeat } from "../shared.js";
+import { CommerceClient } from "marc-stellar-sdk";
+import { retryWithBackoff, createSellerAgent, makeSellerResponse, validateEnv } from "../shared.js";
 
-const cfg: MarcConfig = {
-  rpcUrl: process.env.STELLAR_RPC_URL ?? TESTNET.rpcUrl,
-  networkPassphrase: process.env.STELLAR_NETWORK_PASSPHRASE ?? TESTNET.networkPassphrase,
-  identityContract: process.env.AGENT_IDENTITY_CONTRACT || TESTNET.identityContract,
-  commerceContract: process.env.AGENTIC_COMMERCE_CONTRACT || TESTNET.commerceContract,
-  usdcToken: process.env.USDC_TOKEN_CONTRACT || TESTNET.usdcToken,
-  onTx: (hash) => console.log(`[tx] ${hash} → https://stellar.expert/explorer/testnet/tx/${hash}`),
-};
+validateEnv(["PORT", "SECRET_KEY", "REGISTRY_URL", "GROQ_API_KEY"]);
 
-const seller = Keypair.fromSecret(process.env.SELLER_SECRET!);
-const port = Number(process.env.SELLER_PORT ?? 4504);
+const AGENT_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+const PORT = Number(process.env.SELLER_PORT ?? 4504);
 const AGENT_ID = "seller-researcher";
-const registryUrl = (process.env.REGISTRY_URL ?? "http://localhost:4500").replace(/\/+$/, "");
-const registryApiKey = process.env.REGISTRY_API_KEY?.trim();
-const OUTPUT_FILE = "output/research.json";
+const OUTPUT_DIR = path.join(AGENT_DIR, "output");
+const OUTPUT_FILE = path.join(OUTPUT_DIR, "research.json");
+
+const { app, seller, cfg } = await createSellerAgent({
+  id: AGENT_ID,
+  port: PORT,
+  agentDir: AGENT_DIR,
+});
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
 
 interface ResearchOutput {
   summary: string;
@@ -34,15 +33,22 @@ interface ResearchOutput {
 type ResearchDepth = "brief" | "standard" | "deep";
 
 const DEPTH_CONFIG: Record<ResearchDepth, { sourceRange: string; detail: string }> = {
-  brief:    { sourceRange: "2-3", detail: "Write a concise 1-2 paragraph summary." },
-  standard: { sourceRange: "3-8", detail: "Write a comprehensive multi-section summary in markdown." },
-  deep:     { sourceRange: "8-15", detail: "Write an exhaustive, deeply detailed analysis with sections, subsections, key findings, and critical evaluation of sources." },
+  brief: { sourceRange: "2-3", detail: "Write a concise 1-2 paragraph summary." },
+  standard: {
+    sourceRange: "3-8",
+    detail: "Write a comprehensive multi-section summary in markdown.",
+  },
+  deep: {
+    sourceRange: "8-15",
+    detail:
+      "Write an exhaustive, deeply detailed analysis with sections, subsections, key findings, and critical evaluation of sources.",
+  },
 };
 
 async function generate(task: string, depth: ResearchDepth = "standard"): Promise<ResearchOutput> {
   const { sourceRange, detail } = DEPTH_CONFIG[depth];
   const res = await groq.chat.completions.create({
-    model: "llama-3.3-70b-versatile",
+    model: GROQ_MODEL,
     messages: [
       {
         role: "user",
@@ -54,38 +60,15 @@ async function generate(task: string, depth: ResearchDepth = "standard"): Promis
   ]
 }
 
-Topic: ${task}
-
-Each source must have a real, verifiable URL. Include ${sourceRange} sources. ${detail} The summary should cite sources by their index [1], [2], etc.`,
+Research depth: ${depth}
+Include ${sourceRange} real, verifiable sources. Each source must have a real URL. The summary must cite sources by their index [1], [2], etc.
+${detail}`,
       },
     ],
   });
   const text = res.choices[0].message.content ?? "";
   return JSON.parse(text.replace(/```(?:json)?\s*/gi, "").trim()) as ResearchOutput;
 }
-
-const identity = new IdentityClient(cfg);
-let agentId: bigint | null = null;
-try {
-  await retryWithBackoff(
-    async () => { agentId = await identity.agentOf(seller.publicKey()); },
-    { maxAttempts: 6, baseDelayMs: 2000, label: AGENT_ID },
-  );
-} catch (err) {
-  console.error(`[${AGENT_ID}] Fatal: identity RPC unreachable —`, (err as Error).message);
-  process.exit(1);
-}
-if (!agentId) {
-  await retryWithBackoff(
-    async () => { agentId = await identity.register(seller, `ipfs://${AGENT_ID}.json`); },
-    { maxAttempts: 4, baseDelayMs: 2000, label: AGENT_ID },
-  );
-  console.log(`[${AGENT_ID}] Registered as agent #${agentId}`);
-} else {
-  console.log(`[${AGENT_ID}] Already agent #${agentId}`);
-}
-
-await startHeartbeat(AGENT_ID, registryUrl, { apiKey: registryApiKey, maxAttempts: 6, baseDelayMs: 2000 });
 
 const limiter = rateLimit({
   windowMs: 60_000,
@@ -95,32 +78,53 @@ const limiter = rateLimit({
   message: { error: "too many requests — rate limited (5/min/IP)" },
 });
 
-const app = express();
-app.use(express.json());
-
-app.use((req, res, next) => {
-  console.log(`[${AGENT_ID}] → ${req.method} ${req.path}`, JSON.stringify(req.body));
-  res.on("finish", () => console.log(`[${AGENT_ID}] ← ${res.statusCode}`));
-  next();
-});
-
-app.get("/", (_req, res) => res.json(JSON.parse(fs.readFileSync("agent.json", "utf8"))));
-
-app.get("/health", (_req, res) => res.json({ status: "ok", agentId: AGENT_ID, uptime: process.uptime() }));
-
 app.post("/job", limiter, async (req, res) => {
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const startedAt = Date.now();
   const { jobId, task, depth } = req.body;
-  const resolvedDepth: ResearchDepth = ["brief", "standard", "deep"].includes(depth) ? depth : "standard";
+
+  console.log(
+    `[${AGENT_ID}] [req:${requestId}] Incoming POST /job — headers: ${JSON.stringify({
+      "content-type": req.headers["content-type"],
+      "user-agent": req.headers["user-agent"],
+      "x-forwarded-for": req.headers["x-forwarded-for"] ?? req.socket.remoteAddress,
+    })} — body: ${JSON.stringify(req.body)}`,
+  );
+
+  if (!jobId || isNaN(Number(jobId))) {
+    console.warn(`[${AGENT_ID}] [req:${requestId}] Rejected: invalid jobId`);
+    res
+      .status(400)
+      .json({ success: false, error: "invalid jobId", execution_time_ms: Date.now() - startedAt });
+    return;
+  }
+  if (!task) {
+    console.warn(`[${AGENT_ID}] [req:${requestId}] Rejected: missing task`);
+    res
+      .status(400)
+      .json({ success: false, error: "missing task", execution_time_ms: Date.now() - startedAt });
+    return;
+  }
+  const resolvedDepth: ResearchDepth = ["brief", "standard", "deep"].includes(depth)
+    ? depth
+    : "standard";
   console.log(`[${AGENT_ID}] Job #${jobId} (depth=${resolvedDepth}): ${task}`);
-  res.json({ status: "accepted", jobId, depth: resolvedDepth });
+  const response = makeSellerResponse(
+    { status: "accepted", jobId, depth: resolvedDepth },
+    startedAt,
+  );
+  console.log(`[${AGENT_ID}] [req:${requestId}] Response: ${JSON.stringify(response)}`);
+  res.json(response);
 
   try {
     console.log(`[${AGENT_ID}] Calling Groq...`);
     const research = await generate(task, resolvedDepth);
     const sourceCount = research.sources.length;
-    fs.mkdirSync("output", { recursive: true });
+    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
     fs.writeFileSync(OUTPUT_FILE, JSON.stringify(research, null, 2));
-    console.log(`[${AGENT_ID}] Research done: ${research.summary.length} chars, ${sourceCount} sources`);
+    console.log(
+      `[${AGENT_ID}] Research done: ${research.summary.length} chars, ${sourceCount} sources`,
+    );
 
     const commerce = new CommerceClient(cfg);
     await retryWithBackoff(
@@ -133,4 +137,11 @@ app.post("/job", limiter, async (req, res) => {
   }
 });
 
-app.listen(port, () => console.log(`[${AGENT_ID}] Listening on :${port}`));
+const server = app.listen(PORT, () => console.log(`[${AGENT_ID}] Listening on :${PORT}`));
+const shutdown = () => {
+  console.log(`[${AGENT_ID}] Shutting down...`);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 5000);
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

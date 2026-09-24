@@ -10,6 +10,12 @@
  * The demo prints USDC balances before and after the cancel so the refund
  * is visually verifiable in the terminal.
  *
+ * Interactive mode (issue #606):
+ *   Pass --interactive to step through each phase of the escrow cancellation
+ *   and dispute lifecycle. At each stage the demo pauses and waits for you to
+ *   press Enter, and at the decision point you choose whether to cancel the
+ *   job directly or open a dispute.
+ *
  * Environment variables (all optional — fall back to TESTNET defaults):
  *   BUYER_SECRET               Buyer keypair secret (required)
  *   SELLER_PUBKEY              Seller public key (required — used as job provider)
@@ -21,8 +27,11 @@
  *
  * Run:
  *   npx tsx demo/cancel-flow.ts
+ *   npx tsx demo/cancel-flow.ts --interactive
  */
 import "dotenv/config";
+import * as readline from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 import {
   Keypair,
   Contract,
@@ -43,14 +52,13 @@ import {
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
+const INTERACTIVE = process.argv.includes("--interactive");
+
 const cfg: MarcConfig = {
   rpcUrl: process.env.STELLAR_RPC_URL ?? TESTNET.rpcUrl,
-  networkPassphrase:
-    process.env.STELLAR_NETWORK_PASSPHRASE ?? TESTNET.networkPassphrase,
-  identityContract:
-    process.env.AGENT_IDENTITY_CONTRACT || TESTNET.identityContract,
-  commerceContract:
-    process.env.AGENTIC_COMMERCE_CONTRACT || TESTNET.commerceContract,
+  networkPassphrase: process.env.STELLAR_NETWORK_PASSPHRASE ?? TESTNET.networkPassphrase,
+  identityContract: process.env.AGENT_IDENTITY_CONTRACT || TESTNET.identityContract,
+  commerceContract: process.env.AGENTIC_COMMERCE_CONTRACT || TESTNET.commerceContract,
   usdcToken: process.env.USDC_TOKEN_CONTRACT || TESTNET.usdcToken,
 };
 
@@ -63,6 +71,38 @@ if (!sellerPubkey) {
 }
 
 const BUDGET = BigInt(10_000_000); // 1 USDC (7 decimal places)
+
+// ── Interactive helpers ───────────────────────────────────────────────────────
+
+const rl = INTERACTIVE ? readline.createInterface({ input, output }) : null;
+
+/**
+ * In interactive mode, pause and wait for the user to press Enter before
+ * continuing to the next stage. In scripted mode this is a no-op.
+ */
+async function pause(explanation: string): Promise<void> {
+  if (!rl) return;
+  console.log(`\n${explanation}`);
+  await rl.question("\nPress Enter to continue… ");
+}
+
+/**
+ * In interactive mode, ask the user to pick one of the given options.
+ * Returns the 0-based index of the chosen option. In scripted mode the
+ * provided default index is returned immediately.
+ */
+async function choose(question: string, options: string[], defaultIndex = 0): Promise<number> {
+  if (!rl) return defaultIndex;
+  console.log(`\n${question}`);
+  options.forEach((opt, i) => console.log(`  ${i + 1}. ${opt}`));
+  for (;;) {
+    const answer = (await rl.question(`\nChoice [1-${options.length}] (default ${defaultIndex + 1}): `)).trim();
+    if (answer === "") return defaultIndex;
+    const n = Number(answer);
+    if (Number.isInteger(n) && n >= 1 && n <= options.length) return n - 1;
+    console.log(`  Please enter a number between 1 and ${options.length}.`);
+  }
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -80,9 +120,7 @@ async function pollWithBackoff(
     const done = await fn();
     if (done) return;
     if (attempt === maxAttempts) throw new Error(`Timed out waiting for: ${label}`);
-    console.log(
-      `  [poll] ${label} — attempt ${attempt}/${maxAttempts}, retrying in ${delay}ms…`,
-    );
+    console.log(`  [poll] ${label} — attempt ${attempt}/${maxAttempts}, retrying in ${delay}ms…`);
     await new Promise((r) => setTimeout(r, delay));
     delay = Math.min(delay * multiplier, capMs);
   }
@@ -95,10 +133,7 @@ async function pollWithBackoff(
 async function getUsdc(pubkey: string): Promise<string> {
   try {
     const server = new rpc.Server(cfg.rpcUrl, { allowHttp: false });
-    const op = new Contract(cfg.usdcToken).call(
-      "balance",
-      new Address(pubkey).toScVal(),
-    );
+    const op = new Contract(cfg.usdcToken).call("balance", new Address(pubkey).toScVal());
     const dummy = new Account(Keypair.random().publicKey(), "0");
     const tx = new TransactionBuilder(dummy, {
       fee: BASE_FEE,
@@ -110,14 +145,9 @@ async function getUsdc(pubkey: string): Promise<string> {
     const sim = await server.simulateTransaction(tx);
     if (rpc.Api.isSimulationError(sim)) return "0.00";
     const val = BigInt(
-      scValToNative(
-        (sim as rpc.Api.SimulateTransactionSuccessResponse).result!.retval,
-      ),
+      scValToNative((sim as rpc.Api.SimulateTransactionSuccessResponse).result!.retval),
     );
-    return `${val / 10_000_000n}.${(val % 10_000_000n)
-      .toString()
-      .padStart(7, "0")
-      .slice(0, 2)}`;
+    return `${val / 10_000_000n}.${(val % 10_000_000n).toString().padStart(7, "0").slice(0, 2)}`;
   } catch {
     return "0.00";
   }
@@ -126,6 +156,7 @@ async function getUsdc(pubkey: string): Promise<string> {
 // ── Demo ──────────────────────────────────────────────────────────────────────
 
 console.log("\n=== CANCEL-FLOW DEMO ===");
+if (INTERACTIVE) console.log("Mode: interactive (step through each phase)");
 console.log(`Buyer:  ${buyer.publicKey()}`);
 console.log(`Seller: ${sellerPubkey}\n`);
 
@@ -133,6 +164,9 @@ const identity = new IdentityClient(cfg);
 const commerce = new CommerceClient(cfg);
 
 // Step 1 — Register buyer identity (idempotent)
+await pause(
+  "[1] Register the buyer on-chain. This is idempotent — if the buyer already has an agent identity it is reused.",
+);
 let agentId = await identity.agentOf(buyer.publicKey());
 if (!agentId) {
   agentId = await identity.register(buyer, "ipfs://buyer-cancel-demo.json");
@@ -142,10 +176,16 @@ if (!agentId) {
 }
 
 // Step 2 — Record balance before escrow
+await pause(
+  "[2] Record the buyer's USDC balance before any funds are escrowed. We compare against this later to prove the refund.",
+);
 const balanceBefore = await getUsdc(buyer.publicKey());
 console.log(`[2] Buyer USDC before job creation : ${balanceBefore}`);
 
 // Step 3 — Create escrow job
+await pause(
+  "[3] Create the escrow job. The buyer locks the full budget (1 USDC) in the commerce contract.",
+);
 const jobId = await commerce.createJob(
   buyer,
   sellerPubkey,
@@ -169,29 +209,90 @@ await pollWithBackoff(
 const balanceAfterCreate = await getUsdc(buyer.publicKey());
 console.log(`    Buyer USDC after  job creation : ${balanceAfterCreate}  (1 USDC escrowed)`);
 
-// Step 4 — Cancel the job (no deliverable submitted, so cancellation is allowed)
-console.log(`[4] Cancelling job #${jobId}…`);
-await commerce.cancel(buyer, jobId);
-
-// Poll until job status flips to "cancelled"
-await pollWithBackoff(
-  async () => {
-    const j = await commerce.getJob(jobId);
-    return j?.status === JobStatus.Cancelled;
-  },
-  `job #${jobId} cancellation confirmation`,
-  { baseMs: 2_000, maxAttempts: 10 },
+// Step 4 — Decision point: cancel directly OR open a dispute
+const path = await choose(
+  "[4] Choose how to resolve the escrowed job:",
+  [
+    "Cancel directly — no deliverable was submitted, so the buyer can cancel and reclaim the budget.",
+    "Open a dispute — escalate to the evaluator/resolver, who then resolves it or the buyer claims a timeout refund.",
+  ],
+  0,
 );
+
+if (path === 0) {
+  // Direct cancellation path
+  await pause(
+    "[4a] Cancel the job directly. Because no deliverable was submitted, the contract refunds the full budget to the buyer.",
+  );
+  console.log(`[4] Cancelling job #${jobId}…`);
+  await commerce.cancel(buyer, jobId);
+
+  // Poll until job status flips to "cancelled"
+  await pollWithBackoff(
+    async () => {
+      const j = await commerce.getJob(jobId);
+      return j?.status === JobStatus.Cancelled;
+    },
+    `job #${jobId} cancellation confirmation`,
+    { baseMs: 2_000, maxAttempts: 10 },
+  );
+} else {
+  // Dispute path
+  await pause(
+    "[4b] Open a dispute on the job. The escrow stays locked until the dispute is resolved or a timeout refund is claimed.",
+  );
+  console.log(`[4] Opening dispute on job #${jobId}…`);
+  await commerce.dispute(buyer, jobId);
+
+  await pollWithBackoff(
+    async () => {
+      const j = await commerce.getJob(jobId);
+      return j?.status === JobStatus.Disputed;
+    },
+    `job #${jobId} dispute confirmation`,
+    { baseMs: 2_000, maxAttempts: 10 },
+  );
+
+  const resolution = await choose(
+    "[4c] Resolve the dispute:",
+    [
+      "Resolve the dispute — the evaluator settles it and the budget is refunded to the buyer.",
+      "Claim timeout refund — the buyer reclaims the budget after the dispute window elapses.",
+    ],
+    0,
+  );
+
+  if (resolution === 0) {
+    await pause("[4c] Resolve the dispute as the evaluator, refunding the budget to the buyer.");
+    console.log(`[4] Resolving dispute on job #${jobId}…`);
+    await commerce.resolveDispute(buyer, jobId, JobStatus.Cancelled);
+  } else {
+    await pause("[4c] Claim the timeout refund, returning the escrowed budget to the buyer.");
+    console.log(`[4] Claiming timeout refund on job #${jobId}…`);
+    await commerce.claimTimeoutRefund(buyer, jobId);
+  }
+
+  await pollWithBackoff(
+    async () => {
+      const j = await commerce.getJob(jobId);
+      return j?.status === JobStatus.Cancelled;
+    },
+    `job #${jobId} refund confirmation`,
+    { baseMs: 2_000, maxAttempts: 10 },
+  );
+}
 
 const job = await commerce.getJob(jobId);
 console.log(`    Job status: ${job?.status}`);
 
 // Step 5 — Verify refund
+await pause(
+  "[5] Verify the refund. The buyer's USDC balance should recover to (at least) the pre-escrow balance, proving the full budget was returned.",
+);
 const balanceAfterCancel = await getUsdc(buyer.publicKey());
 console.log(`[5] Buyer USDC after cancellation : ${balanceAfterCancel}`);
 
-const refunded =
-  parseFloat(balanceAfterCancel) >= parseFloat(balanceBefore) - 0.001; // allow small fee tolerance
+const refunded = parseFloat(balanceAfterCancel) >= parseFloat(balanceBefore) - 0.001; // allow small fee tolerance
 if (refunded) {
   console.log(`\n✅  Refund confirmed — budget returned to buyer.`);
 } else {
@@ -202,3 +303,5 @@ if (refunded) {
 }
 
 console.log("\n=== CANCEL-FLOW DONE ===\n");
+
+rl?.close();

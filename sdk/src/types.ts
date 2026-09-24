@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 // Shared types for the marc-stellar SDK.
 //
 // These mirror the on-chain structures of the two Soroban contracts
@@ -55,6 +58,34 @@ export enum JobStatus {
   Rejected = "Rejected",
   Cancelled = "Cancelled",
 }
+
+/**
+ * Reverse mapping from the raw numeric status returned by `getJob()` to the
+ * corresponding `JobStatus` string value.
+ *
+ * The Soroban contract stores `JobStatus` as a compact u32 enum on-chain.
+ * When `scValToNative` decodes it you get a number (0-5). Instead of writing:
+ *
+ * ```ts
+ * const label = Object.keys(JobStatus).find(k => (JobStatus as any)[k] === n);
+ * ```
+ *
+ * you can now do:
+ *
+ * ```ts
+ * const label: JobStatus = JobStatusFromNumber[n]; // e.g. JobStatus.Funded
+ * ```
+ *
+ * The index order matches the Rust enum declaration in `agentic-commerce/src/lib.rs`.
+ */
+export const JobStatusFromNumber: Record<number, JobStatus> = {
+  0: JobStatus.Open,
+  1: JobStatus.Funded,
+  2: JobStatus.Submitted,
+  3: JobStatus.Completed,
+  4: JobStatus.Rejected,
+  5: JobStatus.Cancelled,
+};
 
 /**
  * On-chain job record from the `agentic_commerce` contract.
@@ -119,33 +150,146 @@ export interface MarcConfig {
   onTx?: (hash: string, method: string) => void;
 }
 
+interface PresetConfig {
+  network: "stellar-testnet" | "stellar-mainnet";
+  networkPassphrase: string;
+  rpcUrl: string;
+  identityContract: Address;
+  commerceContract: Address;
+  deployer?: Address;
+  usdcToken: Address;
+}
+
+function getEnvValue(name: string) {
+  if (typeof process === "undefined") return undefined;
+  return process.env[name];
+}
+
+function resolveDeploymentValues(network: "testnet" | "mainnet") {
+  const envIdentity = getEnvValue(
+    network === "testnet" ? "MARC_TESTNET_IDENTITY_CONTRACT" : "MARC_MAINNET_IDENTITY_CONTRACT",
+  );
+  const envCommerce = getEnvValue(
+    network === "testnet" ? "MARC_TESTNET_COMMERCE_CONTRACT" : "MARC_MAINNET_COMMERCE_CONTRACT",
+  );
+  const envUsdc = getEnvValue(
+    network === "testnet" ? "MARC_TESTNET_USDC_TOKEN" : "MARC_MAINNET_USDC_TOKEN",
+  );
+
+  if (envIdentity || envCommerce || envUsdc) {
+    return {
+      identityContract: (envIdentity || "") as Address,
+      commerceContract: (envCommerce || "") as Address,
+      usdcToken: (envUsdc || "") as Address,
+    };
+  }
+
+  try {
+    const deploymentPath = fileURLToPath(
+      new URL(`../../deployments/${network}.json`, import.meta.url),
+    );
+    const deploymentConfig = JSON.parse(readFileSync(deploymentPath, "utf8"));
+    return {
+      identityContract: (deploymentConfig.agent_identity ||
+        deploymentConfig.identityContract ||
+        "") as Address,
+      commerceContract: (deploymentConfig.agentic_commerce ||
+        deploymentConfig.commerceContract ||
+        "") as Address,
+      usdcToken: (deploymentConfig.usdcToken || "") as Address,
+    };
+  } catch {
+    if (network === "testnet") {
+      return {
+        identityContract: "CAMPXYFZJTIPEVOPOAZPRG5OHXKNBDPGTPRCOIO4LVPGEM4TONPY65A5" as Address,
+        commerceContract: "CD2KWU7IE74Z2QKVP3FQ67J46XHNMGIDTNKXVWE7ZNVRC7T6UH46GQXE" as Address,
+        usdcToken: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA" as Address,
+      };
+    }
+
+    return {
+      identityContract: "" as Address,
+      commerceContract: "" as Address,
+      usdcToken: "" as Address,
+    };
+  }
+}
+
+/**
+ * Resolve the Soroban RPC URL for a given network.
+ *
+ * Lookup order (first match wins):
+ *   1. `STELLAR_TESTNET_RPC_URL` / `STELLAR_MAINNET_RPC_URL` — network-specific override
+ *   2. `STELLAR_RPC_URL` — generic override (applies to whichever network is active)
+ *   3. `defaultRpcUrl` — hard-coded fallback (e.g. public SDF endpoint)
+ *
+ * This lets callers point the SDK at a local testnet (e.g. Docker), a
+ * custom RPC provider, or any other endpoint without touching source code.
+ *
+ * @param network      - `"testnet"` or `"mainnet"`, used to pick the
+ *                       network-specific env var first.
+ * @param defaultRpcUrl - The built-in fallback URL for this network.
+ *
+ * @example
+ * // .env
+ * STELLAR_RPC_URL=http://localhost:8000/soroban/rpc
+ *
+ * @example
+ * // .env — per-network override (takes priority over STELLAR_RPC_URL)
+ * STELLAR_TESTNET_RPC_URL=https://my-rpc-provider.example.com
+ */
+export function getEnvRpcUrl(network: "testnet" | "mainnet", defaultRpcUrl: string): string {
+  if (typeof process === "undefined") return defaultRpcUrl;
+  const networkKey = network === "testnet" ? "STELLAR_TESTNET_RPC_URL" : "STELLAR_MAINNET_RPC_URL";
+  return process.env[networkKey] ?? process.env["STELLAR_RPC_URL"] ?? defaultRpcUrl;
+}
+
 /**
  * Preset configuration for Stellar testnet.
  *
- * Contains hard-coded contract addresses and network settings for testnet.
- * Values are updated each time contracts are deployed via `scripts/deploy-testnet.sh`.
- * Use as a base and override fields for custom RPC URLs or other adjustments.
+ * Defaults to the latest deployed testnet addresses when available, while still
+ * allowing environment overrides for custom RPC endpoints or deployment paths.
  *
- * @example
- * ```typescript
- * const cfg = { ...TESTNET, rpcUrl: "http://localhost:8000" };
- * ```
+ * RPC URL resolution order:
+ *   `STELLAR_TESTNET_RPC_URL` → `STELLAR_RPC_URL` → `https://soroban-testnet.stellar.org`
  */
-export const TESTNET = {
-  network: "stellar-testnet" as const,
+export const TESTNET: PresetConfig = {
+  network: "stellar-testnet",
   networkPassphrase: "Test SDF Network ; September 2015",
-  rpcUrl: (typeof process !== "undefined" && process.env["STELLAR_RPC_URL"])
-    ? process.env["STELLAR_RPC_URL"]
-    : "https://soroban-testnet.stellar.org",
-  identityContract:
-    "CAMPXYFZJTIPEVOPOAZPRG5OHXKNBDPGTPRCOIO4LVPGEM4TONPY65A5" as Address,
-  commerceContract:
-    "CD2KWU7IE74Z2QKVP3FQ67J46XHNMGIDTNKXVWE7ZNVRC7T6UH46GQXE" as Address,
-  deployer:
-    "GA5VIZYCUM3IUZZNQTTB7YSLJSE5WZ2EI5EGWNLTWQ234SLSH45MPKX3" as Address,
-  usdcToken:
-    "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA" as Address,
-} as const;
+  rpcUrl: getEnvRpcUrl("testnet", "https://soroban-testnet.stellar.org"),
+  ...resolveDeploymentValues("testnet"),
+  deployer: "GA5VIZYCUM3IUZZNQTTB7YSLJSE5WZ2EI5EGWNLTWQ234SLSH45MPKX3" as Address,
+};
+
+/**
+ * Preset configuration for Stellar mainnet.
+ *
+ * RPC URL resolution order:
+ *   `STELLAR_MAINNET_RPC_URL` → `STELLAR_RPC_URL` → `https://soroban-rpc.mainnet.stellar.org`
+ */
+export const MAINNET: PresetConfig = {
+  network: "stellar-mainnet",
+  networkPassphrase: "Public Global Stellar Network ; September 2015",
+  rpcUrl: getEnvRpcUrl("mainnet", "https://soroban-rpc.mainnet.stellar.org"),
+  ...resolveDeploymentValues("mainnet"),
+};
+
+/**
+ * Demo preset — identical to TESTNET but with the custom MUSD token used by
+ * the Bear Protocol demo and dashboard instead of Circle's testnet USDC.
+ *
+ * Use this preset when running `./start-agents.sh` or the dashboard locally.
+ * Swap back to `TESTNET` when integrating with Circle USDC on testnet.
+ */
+export const DEMO: PresetConfig = {
+  ...TESTNET,
+  usdcToken: (getEnvValue("MARC_DEMO_MUSD_TOKEN") ||
+    "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA") as Address,
+};
+
+export function loadConfig(network: "testnet" | "mainnet"): PresetConfig {
+  return network === "mainnet" ? MAINNET : TESTNET;
+}
 
 /**
  * Symbol topic names emitted by the `agentic_commerce` contract events.
@@ -209,8 +353,42 @@ export interface JobCancelledEvent {
 
 /** Discriminated union of all agentic-commerce contract events. */
 export type JobEvent =
-  | JobCreatedEvent
-  | JobSubmittedEvent
-  | JobCompletedEvent
-  | JobRefundedEvent
-  | JobCancelledEvent;
+  JobCreatedEvent | JobSubmittedEvent | JobCompletedEvent | JobRefundedEvent | JobCancelledEvent;
+
+/**
+ * Returns true if the given JobStatus represents a terminal (final) state.
+ *
+ * Terminal states are those from which no further transitions are possible:
+ * `Completed`, `Cancelled`, and `Rejected`.
+ *
+ * @example
+ * if (isJobTerminal(job.status)) {
+ *   console.log('Job is done — no further action needed');
+ * }
+ */
+export function isJobTerminal(status: JobStatus): boolean {
+  return (
+    status === JobStatus.Completed ||
+    status === JobStatus.Cancelled ||
+    status === JobStatus.Rejected
+  );
+}
+
+/**
+ * Returns true if the given JobStatus represents an active (non-terminal) state.
+ *
+ * Active states are those where the job is still in progress:
+ * `Open`, `Funded`, and `Submitted`.
+ *
+ * @example
+ * if (isJobActive(job.status)) {
+ *   console.log('Job is still in progress');
+ * }
+ */
+export function isJobActive(status: JobStatus): boolean {
+  return (
+    status === JobStatus.Open ||
+    status === JobStatus.Funded ||
+    status === JobStatus.Submitted
+  );
+}

@@ -1,67 +1,41 @@
 import "dotenv/config";
 import fs from "node:fs";
 import path from "node:path";
-import express from "express";
+import { fileURLToPath } from "node:url";
 import rateLimit from "express-rate-limit";
 import Groq from "groq-sdk";
-import { Keypair } from "@stellar/stellar-sdk";
-import { IdentityClient, CommerceClient, TESTNET, type MarcConfig } from "marc-stellar-sdk";
-import { retryWithBackoff, startHeartbeat } from "../shared.js";
+import { CommerceClient } from "marc-stellar-sdk";
+import { createSellerAgent, makeSellerResponse, validateEnv } from "../shared.js";
 
-const cfg: MarcConfig = {
-  rpcUrl: process.env.STELLAR_RPC_URL ?? TESTNET.rpcUrl,
-  networkPassphrase: process.env.STELLAR_NETWORK_PASSPHRASE ?? TESTNET.networkPassphrase,
-  identityContract: process.env.AGENT_IDENTITY_CONTRACT || TESTNET.identityContract,
-  commerceContract: process.env.AGENTIC_COMMERCE_CONTRACT || TESTNET.commerceContract,
-  usdcToken: process.env.USDC_TOKEN_CONTRACT || TESTNET.usdcToken,
-  onTx: (hash) => console.log(`[tx] ${hash} → https://stellar.expert/explorer/testnet/tx/${hash}`),
-};
+validateEnv(["PORT", "SECRET_KEY", "REGISTRY_URL", "GROQ_API_KEY"]);
 
-const seller = Keypair.fromSecret(process.env.SELLER_SECRET!);
-const port = Number(process.env.SELLER_PORT ?? 4502);
-const publicUrl = (process.env.PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/+$/, "");
+const AGENT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.SELLER_PORT ?? 4502);
 const AGENT_ID = "seller-copywriter";
-const OUTPUT_DIR = "output";
+const OUTPUT_DIR = path.join(AGENT_DIR, "output");
+const OUTPUT_URL = "output";
+const publicUrl = (process.env.PUBLIC_URL ?? `http://localhost:${PORT}`).replace(/\/+$/, "");
+
+const { app, seller, cfg } = await createSellerAgent({
+  id: AGENT_ID,
+  port: PORT,
+  agentDir: AGENT_DIR,
+});
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
 
 let callCount = 0;
-
 async function generate(prompt: string): Promise<string> {
   callCount++;
   const res = await groq.chat.completions.create({
-    model: "llama-3.3-70b-versatile",
+    model: GROQ_MODEL,
     messages: [{ role: "user", content: prompt }],
     temperature: 0.9,
     seed: callCount + Date.now(),
   });
   return res.choices[0].message.content ?? "";
 }
-
-const identity = new IdentityClient(cfg);
-let agentId: bigint | null = null;
-try {
-  await retryWithBackoff(
-    async () => { agentId = await identity.agentOf(seller.publicKey()); },
-    { maxAttempts: 6, baseDelayMs: 2000, label: AGENT_ID },
-  );
-} catch (err) {
-  console.error(`[${AGENT_ID}] Fatal: identity RPC unreachable —`, (err as Error).message);
-  process.exit(1);
-}
-if (!agentId) {
-  await retryWithBackoff(
-    async () => { agentId = await identity.register(seller, `ipfs://${AGENT_ID}.json`); },
-    { maxAttempts: 4, baseDelayMs: 2000, label: AGENT_ID },
-  );
-  console.log(`[${AGENT_ID}] Registered as agent #${agentId}`);
-} else {
-  console.log(`[${AGENT_ID}] Already agent #${agentId}`);
-}
-
-const registryUrl = (process.env.REGISTRY_URL ?? "http://localhost:4500").replace(/\/+$/, "");
-const registryApiKey = process.env.REGISTRY_API_KEY?.trim();
-await startHeartbeat(AGENT_ID, registryUrl, { apiKey: registryApiKey, maxAttempts: 6, baseDelayMs: 2000 });
 
 const limiter = rateLimit({
   windowMs: 60_000,
@@ -71,39 +45,73 @@ const limiter = rateLimit({
   message: { error: "too many requests — rate limited (5/min/IP)" },
 });
 
-const app = express();
-app.use(express.json());
-
-app.use((req, res, next) => {
-  console.log(`[${AGENT_ID}] → ${req.method} ${req.path}`, JSON.stringify(req.body));
-  res.on("finish", () => console.log(`[${AGENT_ID}] ← ${res.statusCode}`));
-  next();
-});
-
-app.get("/", (_req, res) => res.json(JSON.parse(fs.readFileSync("agent.json", "utf8"))));
-
-app.get("/health", (_req, res) => res.json({ status: "ok", agentId: AGENT_ID, uptime: process.uptime() }));
-
-app.use(`/${OUTPUT_DIR}`, express.static(OUTPUT_DIR));
-
 app.post("/job", limiter, async (req, res) => {
-  const { jobId, task, tone, audience, keywords } = req.body;
-  if (!jobId || !task) {
-    res.status(400).json({ error: "missing jobId or task" });
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const startedAt = Date.now();
+  const {
+    jobId,
+    task,
+    tone,
+    audience,
+    keywords,
+    brandVoice,
+  }: {
+    jobId: string;
+    task: string;
+    tone?: string;
+    audience?: string;
+    keywords?: string | string[];
+    brandVoice?: Record<string, unknown>;
+  } = req.body;
+
+  console.log(
+    `[${AGENT_ID}] [req:${requestId}] Incoming POST /job — headers: ${JSON.stringify({
+      "content-type": req.headers["content-type"],
+      "user-agent": req.headers["user-agent"],
+      "x-forwarded-for": req.headers["x-forwarded-for"] ?? req.socket.remoteAddress,
+    })} — body: ${JSON.stringify(req.body)}`,
+  );
+
+  if (!jobId || isNaN(Number(jobId))) {
+    console.warn(`[${AGENT_ID}] [req:${requestId}] Rejected: invalid jobId`);
+    res
+      .status(400)
+      .json({ success: false, error: "invalid jobId", execution_time_ms: Date.now() - startedAt });
     return;
   }
-  console.log(`[${AGENT_ID}] Job #${jobId}: ${task}`);
-  res.json({ status: "accepted", jobId });
+  if (!task) {
+    console.warn(`[${AGENT_ID}] [req:${requestId}] Rejected: missing task`);
+    res
+      .status(400)
+      .json({ success: false, error: "missing task", execution_time_ms: Date.now() - startedAt });
+    return;
+  }
+  if (brandVoice !== undefined && (typeof brandVoice !== "object" || Array.isArray(brandVoice))) {
+    res.status(400).json({
+      success: false,
+      error: "brandVoice must be an object",
+      execution_time_ms: Date.now() - startedAt,
+    });
+    return;
+  }
+  console.log(
+    `[${AGENT_ID}] Job #${jobId}: ${task}${brandVoice ? ` | brandVoice: ${JSON.stringify(brandVoice)}` : ""}`,
+  );
+  res.json(makeSellerResponse({ status: "accepted", jobId }, startedAt));
 
   try {
     console.log(`[${AGENT_ID}] Calling Groq...`);
     const brandContext = [
       tone ? `Tone: ${tone}` : "",
       audience ? `Target audience: ${audience}` : "",
-      keywords?.length ? `Keywords to include: ${Array.isArray(keywords) ? keywords.join(", ") : keywords}` : "",
-    ].filter(Boolean).join("\n");
+      keywords?.length
+        ? `Keywords to include: ${Array.isArray(keywords) ? keywords.join(", ") : keywords}`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
     const copy = await generate(
-      `You are a professional copywriter. Write compelling website copy for:\n\n${task}${brandContext ? `\n\nBrand guidelines:\n${brandContext}` : ""}\n\nStructure in markdown: # Headline, ## Subheadline, ## Body, ## CTA.`
+      `You are a professional copywriter. Write compelling website copy for:\n\n${task}${brandContext ? `\n\nBrand guidelines:\n${brandContext}` : ""}\n\nStructure in markdown: # Headline, ## Subheadline, ## Body, ## CTA.`,
     );
     if (copy.length < 20) {
       throw new Error(`Generated copy too short (${copy.length} chars)`);
@@ -112,7 +120,7 @@ app.post("/job", limiter, async (req, res) => {
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
     const filename = `job-${jobId}.md`;
     fs.writeFileSync(path.join(OUTPUT_DIR, filename), copy);
-    const deliverable = `${publicUrl}/${OUTPUT_DIR}/${filename}`;
+    const deliverable = `${publicUrl}/${OUTPUT_URL}/${filename}`;
     console.log(`[${AGENT_ID}] Copy written (${copy.length} chars) → ${deliverable}`);
 
     const commerce = new CommerceClient(cfg);
@@ -132,4 +140,11 @@ app.post("/job", limiter, async (req, res) => {
   }
 });
 
-app.listen(port, () => console.log(`[${AGENT_ID}] Listening on :${port}`));
+const server = app.listen(PORT, () => console.log(`[${AGENT_ID}] Listening on :${PORT}`));
+const shutdown = () => {
+  console.log(`[${AGENT_ID}] Shutting down...`);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 5000);
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

@@ -1,181 +1,220 @@
 import {
   Contract,
   Keypair,
-  rpc,
-  TransactionBuilder,
   nativeToScVal,
   scValToNative,
-  BASE_FEE,
   Address,
   xdr,
-  Account,
 } from "@stellar/stellar-sdk";
 import type { Job, JobStatus, MarcConfig } from "./types.js";
+import { BaseClient } from "./baseClient.js";
+import type { Signer } from "./signer.js";
+import { signerPublicKey } from "./signer.js";
 
-// --- ScVal helpers (exported for custom contract interactions) ---
+const MAX_I128 = (1n << 127n) - 1n;
 
-/** Encode a bigint as a 128-bit signed integer ScVal. */
-export const i128ToScVal = (v: bigint) => nativeToScVal(v, { type: "i128" });
-
-/** Encode a bigint as a 128-bit unsigned integer ScVal. */
-export const u128ToScVal = (v: bigint) => nativeToScVal(v, { type: "u128" });
-
-/** Encode a bigint as a 64-bit unsigned integer ScVal. */
-export const u64ToScVal  = (v: bigint) => nativeToScVal(v, { type: "u64" });
-
-/** Encode a number as a 32-bit unsigned integer ScVal. */
-export const u32ToScVal  = (v: number) => nativeToScVal(v, { type: "u32" });
-
-/** Encode a string as a string ScVal. */
-export const strToScVal  = (v: string) => nativeToScVal(v, { type: "string" });
-
-/** Encode a Stellar address string as an address ScVal. */
-export const addrToScVal = (v: string) => new Address(v).toScVal();
+// --- ScVal encoding helpers (exported for custom contract interactions) ---
 
 /**
- * Typed wrapper around the `agentic_commerce` Soroban contract.
+ * Encode a `bigint` as a Soroban `i128` ScVal.
  *
- * Handles the complete job lifecycle: create → submit → complete/cancel, plus
- * admin helpers (setTreasury, setFeeBps) and read-only queries. Automatically
- * manages ScVal encoding/decoding, transaction building, and RPC submission.
+ * Use this when passing signed 128-bit integer arguments to Soroban contracts
+ * that are not covered by the SDK's built-in helpers (e.g. custom token amounts).
+ *
+ * @param v - The integer value to encode. Must fit in a signed 128-bit integer.
+ * @returns An XDR ScVal of type `i128`.
+ */
+export const i128ToScVal = (v: bigint) => nativeToScVal(v, { type: "i128" });
+
+/**
+ * Encode a `bigint` as a Soroban `u128` ScVal.
+ *
+ * @param v - The integer value to encode. Must fit in an unsigned 128-bit integer.
+ * @returns An XDR ScVal of type `u128`.
+ */
+export const u128ToScVal = (v: bigint) => nativeToScVal(v, { type: "u128" });
+
+/**
+ * Encode a `bigint` as a Soroban `u64` ScVal.
+ *
+ * @param v - The integer value to encode. Must fit in an unsigned 64-bit integer.
+ * @returns An XDR ScVal of type `u64`.
+ */
+export const u64ToScVal = (v: bigint) => nativeToScVal(v, { type: "u64" });
+
+/**
+ * Encode a `number` as a Soroban `u32` ScVal.
+ *
+ * @param v - The integer value to encode. Must be a non-negative 32-bit integer.
+ * @returns An XDR ScVal of type `u32`.
+ */
+export const u32ToScVal = (v: number) => nativeToScVal(v, { type: "u32" });
+
+/**
+ * Encode a `string` as a Soroban `Symbol` or `String` ScVal.
+ *
+ * @param v - The string value to encode.
+ * @returns An XDR ScVal of type `string`.
+ */
+export const strToScVal = (v: string) => nativeToScVal(v, { type: "string" });
+
+/**
+ * Encode a Stellar address string (G... or C...) as a Soroban `Address` ScVal.
+ *
+ * @param v - The Stellar address in StrKey format.
+ * @returns An XDR ScVal of type `address`.
+ */
+export const addrToScVal = (v: string) => new Address(v).toScVal();
+
+// --- ScVal decoding helpers ---
+
+/**
+ * Decode a Soroban `i128` ScVal to a `bigint`.
+ *
+ * @param v - The XDR ScVal to decode.
+ * @returns The decoded value as a `bigint` (signed 128-bit integer).
+ */
+export const i128FromScVal = (v: xdr.ScVal): bigint => BigInt(scValToNative(v) as string);
+
+/**
+ * Decode a Soroban `u128` ScVal to a `bigint`.
+ *
+ * @param v - The XDR ScVal to decode.
+ * @returns The decoded value as a `bigint` (unsigned 128-bit integer).
+ */
+export const u128FromScVal = (v: xdr.ScVal): bigint => BigInt(scValToNative(v) as string);
+
+/**
+ * Decode a Soroban `u64` ScVal to a `bigint`.
+ *
+ * @param v - The XDR ScVal to decode.
+ * @returns The decoded value as a `bigint` (unsigned 64-bit integer).
+ */
+export const u64FromScVal = (v: xdr.ScVal): bigint => BigInt(scValToNative(v) as string);
+
+/**
+ * Decode a Soroban `u32` ScVal to a `number`.
+ *
+ * @param v - The XDR ScVal to decode.
+ * @returns The decoded value as a `number` (unsigned 32-bit integer).
+ */
+export const u32FromScVal = (v: xdr.ScVal): number => Number(scValToNative(v));
+
+/**
+ * Decode a Soroban `String` or `Symbol` ScVal to a JS `string`.
+ *
+ * @param v - The XDR ScVal to decode.
+ * @returns The decoded value as a `string`.
+ */
+export const strFromScVal = (v: xdr.ScVal): string => scValToNative(v) as string;
+
+/**
+ * Decode a Soroban `Address` ScVal to a Stellar StrKey string (G... or C...).
+ *
+ * @param v - The XDR ScVal of type `address` to decode.
+ * @returns The decoded Stellar address in StrKey format.
+ */
+export const addrFromScVal = (v: xdr.ScVal): string => Address.fromScVal(v).toString();
+
+/**
+ * Typed client for the `agentic_commerce` Soroban contract.
+ *
+ * Manages the full job lifecycle: create → submit → complete/cancel. Also
+ * provides admin helpers (`setTreasury`, `setFeeBps`) and read-only queries
+ * (`getJob`, `feeBps`, `getBalance`).
+ *
+ * All methods handle ScVal encoding/decoding, transaction building, signing,
+ * and submission internally — callers only work with plain JS types.
  *
  * @example
  * ```typescript
- * const client = new CommerceClient(TESTNET);
- * const jobId = await client.createJob(
+ * import { CommerceClient, TESTNET } from "marc-stellar-sdk";
+ * import { Keypair } from "@stellar/stellar-sdk";
+ *
+ * const commerce = new CommerceClient(TESTNET);
+ * const clientKeypair = Keypair.fromSecret("S...");
+ *
+ * // Create an escrow job
+ * const jobId = await commerce.createJob(
  *   clientKeypair,
  *   providerAddress,
  *   evaluatorAddress,
- *   tokenAddress,
- *   1_000_000n, // 1 USDC (with 6 decimals)
- *   "Build me a website"
+ *   TESTNET.usdcToken,
+ *   10_000_000n,      // 10 USDC (6 decimal places)
+ *   "Summarize this dataset",
  * );
- * await client.disconnect();
  * ```
  */
-export class CommerceClient {
-  private server: rpc.Server;
+export class CommerceClient extends BaseClient {
   private contract: Contract;
 
-  /**
-   * Initialize the CommerceClient with a configuration.
-   *
-   * @param cfg - Configuration containing RPC URL, network passphrase, contract address, etc.
-   */
-  constructor(private cfg: MarcConfig) {
-    this.server = new rpc.Server(cfg.rpcUrl, {
-      allowHttp: cfg.rpcUrl.startsWith("http://"),
-      timeout: 15000,
-    });
+  constructor(cfg: MarcConfig) {
+    super(cfg);
     this.contract = new Contract(cfg.commerceContract);
   }
 
   /**
-   * Create a new job with token held in escrow.
+   * Create a funded escrow job.
    *
-   * Transfers `budget` tokens from the client to the contract escrow account.
-   * The client, provider, and evaluator must all have received auth-signatures
-   * for the contract invocation (handled automatically by this method).
+   * Transfers `budget` tokens from `client` into contract escrow atomically.
+   * The job immediately enters `Funded` status on success.
    *
-   * @param client - The job creator's keypair (must sign the transaction)
-   * @param provider - The service provider's Stellar address
-   * @param evaluator - The evaluator's Stellar address (approves completion)
-   * @param token - Token contract address (e.g., USDC SAC)
-   * @param budget - Token amount in smallest units (e.g., 1_000_000 = 1 USDC with 6 decimals)
-   * @param description - Human-readable job description
-   * @returns The newly assigned job ID
+   * @param client - The client's Keypair. Funds are pulled from this account.
+   * @param provider - The service provider's Stellar address (G...). Will submit deliverables.
+   * @param evaluator - The evaluator's Stellar address (G...). Approves completion and triggers payout.
+   * @param token - The token contract address (C...) to use for payment (e.g. `TESTNET.usdcToken`).
+   * @param budget - The escrow amount in the token's smallest unit (e.g. `10_000_000n` = 10 USDC).
+   *                 Must be greater than 0 and fit within a signed 128-bit integer.
+   * @param description - Human-readable description of the work to be done.
+   * @returns The new job's on-chain ID as a `bigint`.
+   * @throws {Error} If `budget <= 0`, `budget` exceeds `i128` max, the client
+   *                 has insufficient funds, or the transaction fails.
+   *
+   * @example
+   * ```typescript
+   * const jobId = await commerce.createJob(
+   *   clientKeypair, providerAddress, evaluatorAddress,
+   *   TESTNET.usdcToken, 5_000_000n, "Write a landing page",
+   * );
+   * ```
    */
   async createJob(
-    client: Keypair,
+    client: Signer,
     provider: string,
     evaluator: string,
     token: string,
     budget: bigint,
     description: string,
   ): Promise<bigint> {
+    if (budget <= 0n) throw new Error("budget must be greater than 0");
+    if (budget > MAX_I128) throw new Error("budget exceeds i128 max");
+
     const op = this.contract.call(
       "create_job",
-      new Address(client.publicKey()).toScVal(),
+      new Address(signerPublicKey(client)).toScVal(),
       new Address(provider).toScVal(),
       new Address(evaluator).toScVal(),
       new Address(token).toScVal(),
       nativeToScVal(budget, { type: "i128" }),
       nativeToScVal(description, { type: "string" }),
     );
-    return await this.invoke(client, op, (v) => BigInt(scValToNative(v) as string));
+    return await this.invoke(client, op, (v) => BigInt(scValToNative(v) as string), "commerce");
   }
 
   /**
-   * Submit a deliverable for a funded job (provider-only).
+   * Create a funded escrow job and wait for on-chain confirmation.
    *
-   * @param provider - The service provider's keypair (must match the job's provider)
-   * @param jobId - The ID of the job being worked on
-   * @param deliverable - IPFS hash or URL pointing to the completed work
-   */
-  async submit(
-    provider: Keypair,
-    jobId: bigint,
-    deliverable: string,
-  ): Promise<void> {
-    const op = this.contract.call(
-      "submit",
-      new Address(provider.publicKey()).toScVal(),
-      nativeToScVal(jobId, { type: "u64" }),
-      nativeToScVal(deliverable, { type: "string" }),
-    );
-    await this.invoke(provider, op, () => undefined);
-  }
-
-  /**
-   * Mark a submitted job as completed and trigger payout (evaluator-only).
+   * Functionally identical to {@link createJob} — included for API symmetry
+   * with patterns that distinguish "fire-and-forget" from "wait for finality".
    *
-   * Splits the budget 99% to provider, 1% to treasury. Requires auth from
-   * the evaluator address recorded during job creation.
-   *
-   * @param evaluator - The evaluator's keypair (must match the job's evaluator)
-   * @param jobId - The ID of the job to complete
-   */
-  async complete(evaluator: Keypair, jobId: bigint): Promise<void> {
-    const op = this.contract.call(
-      "complete",
-      new Address(evaluator.publicKey()).toScVal(),
-      nativeToScVal(jobId, { type: "u64" }),
-    );
-    await this.invoke(evaluator, op, () => undefined);
-  }
-
-  /**
-   * Cancel a funded job and refund the full budget (client-only).
-   *
-   * Only callable while the job is in the Funded state. After cancellation,
-   * the full budget is returned to the client's token balance.
-   *
-   * @param client - The job creator's keypair (must match the job's client)
-   * @param jobId - The ID of the job to cancel
-   */
-  async cancel(client: Keypair, jobId: bigint): Promise<void> {
-    const op = this.contract.call(
-      "cancel",
-      new Address(client.publicKey()).toScVal(),
-      nativeToScVal(jobId, { type: "u64" }),
-    );
-    await this.invoke(client, op, () => undefined);
-  }
-
-  /**
-   * Create a job and poll until completion, cancellation, or rejection.
-   *
-   * Returns the final Job object when status transitions from "Funded" to
-   * a terminal state (Completed, Cancelled, Rejected). Throws on timeout.
-   *
-   * @param client The funding/cancelling client keypair
-   * @param provider Provider address (string)
-   * @param evaluator Evaluator address (string)
-   * @param token Token contract address
-   * @param budget Funding amount in base units
-   * @param description Job description
-   * @param pollInterval Milliseconds between status checks (default: 2000)
-   * @param timeout Total timeout in milliseconds (default: 5 minutes)
+   * @param client - The client's Keypair. Funds are pulled from this account.
+   * @param provider - The service provider's Stellar address (G...).
+   * @param evaluator - The evaluator's Stellar address (G...).
+   * @param token - The token contract address (C...) for payment.
+   * @param budget - The escrow amount in the token's smallest unit.
+   * @param description - Human-readable description of the work.
+   * @returns The new job's on-chain ID as a `bigint`, resolved after on-chain finality.
+   * @throws {Error} If `budget <= 0`, `budget` exceeds `i128` max, or the transaction fails.
    */
   async createJobAndWait(
     client: Keypair,
@@ -184,48 +223,115 @@ export class CommerceClient {
     token: string,
     budget: bigint,
     description: string,
-    pollInterval: number = 2000,
-    timeout: number = 5 * 60 * 1000,
-  ): Promise<Job> {
-    // Create the job and get its ID
-    const jobId = await this.createJob(client, provider, evaluator, token, budget, description);
-
-    // Poll until terminal state
-    const startTime = Date.now();
-    while (true) {
-      const elapsed = Date.now() - startTime;
-      if (elapsed > timeout) {
-        throw new Error(`Timeout waiting for job ${jobId} to reach terminal state after ${timeout}ms`);
-      }
-
-      const job = await this.getJob(jobId);
-      if (!job) {
-        throw new Error(`Job ${jobId} not found`);
-      }
-
-      // Terminal states
-      if (
-        job.status === "Completed" ||
-        job.status === "Cancelled" ||
-        job.status === "Rejected"
-      ) {
-        return job;
-      }
-
-      // Still in Funded or Submitted state, keep polling
-      await new Promise((r) => setTimeout(r, pollInterval));
-    }
+  ): Promise<bigint> {
+    return this.createJob(client, provider, evaluator, token, budget, description);
   }
 
-  /** Read a job by ID. Returns null if not found. */
-  async getJob(jobId: bigint): Promise<Job | null> {
+  /**
+   * Provider submits a deliverable URL or content for a funded job.
+   *
+   * Transitions the job from `Funded` → `Submitted` status. Only the assigned
+   * provider address can call this method successfully.
+   *
+   * @param provider - The provider's Keypair. Must match the job's `provider` field.
+   * @param jobId - The ID of the job to submit a deliverable for.
+   * @param deliverable - URL or content string representing the completed work
+   *                      (e.g. an IPFS URL, a raw text summary, or a hosted file link).
+   * @returns A promise that resolves when the submission is confirmed on-chain.
+   * @throws {Error} If the signer is not the assigned provider, the job is not in
+   *                 `Funded` status, or the transaction fails.
+   *
+   * @example
+   * ```typescript
+   * await commerce.submit(providerKeypair, jobId, "https://ipfs.io/ipfs/Qm...");
+   * ```
+   */
+  async submit(provider: Keypair, jobId: bigint, deliverable: string): Promise<void> {
     const op = this.contract.call(
-      "get_job",
+      "submit",
+      new Address(signerPublicKey(provider)).toScVal(),
+      nativeToScVal(jobId, { type: "u64" }),
+      nativeToScVal(deliverable, { type: "string" }),
+    );
+    await this.invoke(provider, op, () => undefined, "commerce");
+  }
+
+  /**
+   * Evaluator marks a submitted job as complete and triggers the payout.
+   *
+   * Transitions the job from `Submitted` → `Completed`. Funds are split:
+   * 99% to the provider, 1% (or the configured fee) to the treasury.
+   * Only the assigned evaluator address can call this.
+   *
+   * @param evaluator - The evaluator's Signer. Must match the job's `evaluator` field.
+   * @param jobId - The ID of the job to complete.
+   * @returns A promise that resolves when completion and payout are confirmed on-chain.
+   * @throws {Error} If the signer is not the assigned evaluator, the job is not in
+   *                 `Submitted` status, or the transaction fails.
+   *
+   * @example
+   * ```typescript
+   * await commerce.complete(evaluatorKeypair, jobId);
+   * ```
+   */
+  async complete(evaluator: Signer, jobId: bigint): Promise<void> {
+    const op = this.contract.call(
+      "complete",
+      new Address(signerPublicKey(evaluator)).toScVal(),
       nativeToScVal(jobId, { type: "u64" }),
     );
-    return await this.simulate(op, (v) => {
+    await this.invoke(evaluator, op, () => undefined, "commerce");
+  }
+
+  /**
+   * Client cancels a funded job and receives a full refund.
+   *
+   * Transitions the job to `Cancelled` status and returns the full budget
+   * to the client. Only the original client address can cancel a job, and
+   * only while it is in `Funded` or `Submitted` status.
+   *
+   * @param client - The client's Signer. Must match the job's `client` field.
+   * @param jobId - The ID of the job to cancel.
+   * @returns A promise that resolves when the cancellation and refund are confirmed on-chain.
+   * @throws {Error} If the signer is not the job's client, the job is not cancellable,
+   *                 or the transaction fails.
+   *
+   * @example
+   * ```typescript
+   * await commerce.cancel(clientKeypair, jobId);
+   * ```
+   */
+  async cancel(client: Signer, jobId: bigint): Promise<void> {
+    const op = this.contract.call(
+      "cancel",
+      new Address(signerPublicKey(client)).toScVal(),
+      nativeToScVal(jobId, { type: "u64" }),
+    );
+    await this.invoke(client, op, () => undefined, "commerce");
+  }
+
+  /**
+   * Fetch a job record by its on-chain ID.
+   *
+   * Returns `null` only when the contract confirms the job does not exist.
+   * Throws on RPC/network errors so callers can distinguish "not found" from "outage".
+   *
+   * @param jobId - The on-chain job ID (as returned by {@link createJob}).
+   * @returns The {@link Job} record if found, or `null` if no job exists with that ID.
+   * @throws {Error} On RPC/network failure.
+   *
+   * @example
+   * ```typescript
+   * const job = await commerce.getJob(42n);
+   * if (job) {
+   *   console.log(job.status, job.budget);
+   * }
+   * ```
+   */
+  async getJob(jobId: bigint): Promise<Job | null> {
+    const op = this.contract.call("get_job", nativeToScVal(jobId, { type: "u64" }));
+    return await this.simulateOption(op, (v) => {
       const native = scValToNative(v);
-      if (!native) return null;
       return {
         id: BigInt(native.id),
         client: native.client,
@@ -244,9 +350,13 @@ export class CommerceClient {
   }
 
   /**
-   * Read the current treasury fee in basis points (e.g., 100 = 1%).
+   * Read the current protocol fee in basis points (bps).
    *
-   * @returns Fee as an integer (1-500, capped at 5%)
+   * 100 bps = 1%. The contract caps the fee at 500 bps (5%).
+   * Default is 100 bps (1%).
+   *
+   * @returns The fee as a `number` (e.g. `100` for 1%).
+   * @throws {Error} On RPC/network failure.
    */
   async feeBps(): Promise<number> {
     const op = this.contract.call("fee_bps");
@@ -254,54 +364,81 @@ export class CommerceClient {
   }
 
   /**
-   * Update the treasury address (admin-only).
+   * Admin: update the treasury address that receives protocol fees.
    *
-   * @param admin - The admin keypair (must be authorized in contract state)
-   * @param newTreasury - The new treasury's Stellar address
+   * Only the contract admin can call this function. The treasury receives
+   * the `feeBps` portion of each completed job's budget.
+   *
+   * @param admin - The admin's Signer (must be the contract's configured admin).
+   * @param newTreasury - The new treasury's Stellar address (G...).
+   * @returns A promise that resolves when the update is confirmed on-chain.
+   * @throws {Error} If the signer is not the admin or the transaction fails.
+   *
+   * @example
+   * ```typescript
+   * await commerce.setTreasury(adminKeypair, "GABC...");
+   * ```
    */
-  async setTreasury(admin: Keypair, newTreasury: string): Promise<void> {
+  async setTreasury(admin: Signer, newTreasury: string): Promise<void> {
     const op = this.contract.call(
       "set_treasury",
-      new Address(admin.publicKey()).toScVal(),
+      new Address(signerPublicKey(admin)).toScVal(),
       new Address(newTreasury).toScVal(),
     );
-    await this.invoke(admin, op, () => undefined);
+    await this.invoke(admin, op, () => undefined, "commerce");
   }
 
   /**
-   * Update the treasury fee in basis points (admin-only, capped at 500 = 5%).
+   * Admin: update the protocol fee rate in basis points.
    *
-   * @param admin - The admin keypair (must be authorized in contract state)
-   * @param newBps - New fee in basis points (1-500)
+   * The contract enforces a maximum of 500 bps (5%). Setting a higher value
+   * will be rejected by the contract.
+   *
+   * @param admin - The admin's Signer (must be the contract's configured admin).
+   * @param newBps - The new fee in basis points (0–500). E.g. `100` = 1%.
+   * @returns A promise that resolves when the fee update is confirmed on-chain.
+   * @throws {Error} If the signer is not the admin, `newBps > 500`, or the transaction fails.
+   *
+   * @example
+   * ```typescript
+   * await commerce.setFeeBps(adminKeypair, 50); // 0.5%
+   * ```
    */
-  async setFeeBps(admin: Keypair, newBps: number): Promise<void> {
+  async setFeeBps(admin: Signer, newBps: number): Promise<void> {
     const op = this.contract.call(
       "set_fee_bps",
-      new Address(admin.publicKey()).toScVal(),
+      new Address(signerPublicKey(admin)).toScVal(),
       nativeToScVal(newBps, { type: "u32" }),
     );
-    await this.invoke(admin, op, () => undefined);
+    await this.invoke(admin, op, () => undefined, "commerce");
   }
 
   /**
-   * Clean up resources (no-op for stateless HTTP clients).
-   * Call this when the client is no longer needed for symmetry with other clients.
-   * The RPC server uses stateless HTTP connections, so no cleanup is required.
-   */
-  disconnect(): void {
-    // No-op: RPC Server uses stateless HTTP, no long-lived connections to close
-  }
-
-  /**
-   * Get the balance of `address` for a given token.
-   * Pass `"native"` for XLM (returns stroops as bigint),
-   * or a Soroban token contract address for SAC/custom tokens.
+   * Get the token balance of an address.
+   *
+   * Supports both native XLM and any Soroban token contract (SAC or custom).
+   *
+   * @param address - The Stellar address (G...) to query.
+   * @param token - Either `"native"` for XLM (returns stroops as `bigint`),
+   *                or a Soroban token contract address (C...) for SAC/custom tokens.
+   * @returns The balance as a `bigint` in the smallest unit of the token
+   *          (stroops for XLM, micro-USDC for USDC, etc.).
+   * @throws {Error} On RPC failure or if the address does not exist on-chain.
+   *
+   * @example
+   * ```typescript
+   * // USDC balance
+   * const balance = await commerce.getBalance("GABC...", TESTNET.usdcToken);
+   * console.log("Balance (micro-USDC):", balance);
+   * ```
    */
   async getBalance(address: string, token: string): Promise<bigint> {
     if (token === "native") {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const account = (await this.server.getAccount(address)) as any;
-      const xlmBalance = account.balances.find((b: any) => b.asset_type === "native");
+      const account = await this.server.getAccount(address);
+      const balances =
+        (account as unknown as { balances?: Array<{ asset_type?: string; balance?: string }> })
+          .balances ?? [];
+      const xlmBalance = balances.find((b) => b.asset_type === "native");
       return BigInt(Math.round(Number(xlmBalance?.balance ?? "0") * 1e7));
     }
     const tokenContract = new Contract(token);
@@ -309,61 +446,13 @@ export class CommerceClient {
     return await this.simulate(op, (v) => BigInt(scValToNative(v) as string));
   }
 
-  // --- internals (same pattern as IdentityClient) ---
-
-  private async invoke<T>(
-    signer: Keypair,
-    op: xdr.Operation,
-    decode: (scVal: xdr.ScVal) => T,
-  ): Promise<T> {
-    const account = await this.server.getAccount(signer.publicKey());
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: this.cfg.networkPassphrase,
-    })
-      .addOperation(op)
-      .setTimeout(30)
-      .build();
-    const prepared = await this.server.prepareTransaction(tx);
-    prepared.sign(signer);
-    const sent = await this.server.sendTransaction(prepared);
-    if (sent.status === "ERROR") throw new Error(`submit failed: ${sent.errorResult}`);
-    let getResp = await this.server.getTransaction(sent.hash);
-    while (getResp.status === "NOT_FOUND") {
-      await new Promise((r) => setTimeout(r, 1000));
-      getResp = await this.server.getTransaction(sent.hash);
-    }
-    if (getResp.status !== "SUCCESS") {
-      const failed = getResp as rpc.Api.GetFailedTransactionResponse;
-      const detail = failed.resultXdr?.result()?.switch()?.name ?? getResp.status;
-      throw new Error(`tx failed: ${detail}`);
-    }
-    this.cfg.onTx?.(sent.hash, "commerce");
-    return decode(getResp.returnValue!);
-  }
-
-  private async simulate<T>(op: xdr.Operation, decode: (v: xdr.ScVal) => T): Promise<T> {
-    const ephemeral = Keypair.random();
-    const dummy = new Account(ephemeral.publicKey(), "0");
-    const tx = new TransactionBuilder(dummy, {
-      fee: BASE_FEE,
-      networkPassphrase: this.cfg.networkPassphrase,
-    })
-      .addOperation(op)
-      .setTimeout(30)
-      .build();
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const sim = await this.server.simulateTransaction(tx);
-        if (rpc.Api.isSimulationError(sim)) throw new Error(sim.error);
-        const result = (sim as rpc.Api.SimulateTransactionSuccessResponse).result;
-        if (!result) throw new Error("no simulation result");
-        return decode(result.retval);
-      } catch (err) {
-        if (attempt === 3) throw err;
-        await new Promise((r) => setTimeout(r, 2000 * attempt));
-      }
-    }
-    throw new Error("unreachable");
+  /**
+   * Disconnect and clean up any resources held by this client.
+   *
+   * The RPC server uses stateless HTTP connections, so this is currently a
+   * no-op. Call it for symmetry when disposing of client instances.
+   */
+  disconnect(): void {
+    // No-op for the current implementation.
   }
 }

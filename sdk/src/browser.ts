@@ -9,7 +9,13 @@
 export * from "./types.js";
 export { IdentityClient } from "./identity.js";
 export { CommerceClient } from "./commerce.js";
-export { marcFetch, type MarcFetchOptions } from "./marcFetch.js";
+export {
+  marcFetch,
+  parsePaymentRequiredHeader,
+  type MarcFetchOptions,
+  type PaymentStatus,
+  type ParsedPaymentRequirement,
+} from "./marcFetch.js";
 
 // ScVal encoding helpers for custom contract interactions
 export {

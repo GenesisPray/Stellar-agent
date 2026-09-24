@@ -3,7 +3,7 @@ target/
 **/*.rs.bk
 Cargo.lock
 
-# Node
+# Node — root-level entry covers all packages, no per-package .gitignore needed
 node_modules/
 dist/
 *.tsbuildinfo
@@ -39,6 +39,56 @@ npm-debug.log*
 # Build outputs
 build/
 out/
+.next/
 
 # Mutation testing results
 mutation-results-*/
+
+# Test snapshots & coverage
+**/__snapshots__/
+**/*.snap
+coverage/
+.nyc_output/
+*.lcov
+
+# Soroban / Stellar test artifacts
+/test_snapshots/
+soroban/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Debug / profiling
+*.cpuprofile
+*.heapprofile
+*.heapsnapshot
+.clinic/
+clinic-*
+
+# TypeScript incremental build info (project-level)
+**/*.tsbuildinfo
+
+# Runtime / process
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Optional npm cache
+.npm/
+
+# Yarn v2+
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions

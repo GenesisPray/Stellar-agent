@@ -1,15 +1,3 @@
-/**
- * Agent Registry — localhost only
- * Serves agent.json manifests so the buyer can discover available sellers.
- * Tracks agent liveness via heartbeat — dead agents auto-deregister.
- *
- * GET    /agents              → list alive agents (heartbeating)
- * GET    /agents?include_inactive=true → list all agents including deregistered
- * GET    /agents/:id     → get a specific agent manifest
- * DELETE /agents/:id     → manually deregister an agent
- * POST   /heartbeat      → agent pings with { agentId }
- * GET    /health         → registry + agent count
- */
 import express from "express";
 import fs from "node:fs";
 import path from "node:path";
@@ -30,6 +18,8 @@ const agentListRequestCounts = new Map<string, { count: number; resetAt: number 
 type AgentEntry = {
   lastHeartbeat: number;
   manifest: Record<string, unknown>;
+  /** Capability tags extracted from the manifest and normalised to lowercase. */
+  tags: string[];
 };
 
 const activeAgents = new Map<string, AgentEntry>();
@@ -38,20 +28,57 @@ const activeAgents = new Map<string, AgentEntry>();
 const REQUIRED_STRING_FIELDS = ["id", "name", "description", "url"] as const;
 
 function validateManifest(m: unknown): string | null {
-  if (typeof m !== "object" || m === null || Array.isArray(m)) return "manifest must be a JSON object";
+  if (typeof m !== "object" || m === null || Array.isArray(m))
+    return "manifest must be a JSON object";
   const obj = m as Record<string, unknown>;
   for (const field of REQUIRED_STRING_FIELDS) {
     if (typeof obj[field] !== "string" || !(obj[field] as string).trim()) {
       return `field "${field}" must be a non-empty string`;
     }
   }
-  if (typeof obj.price_usdc !== "number" || obj.price_usdc <= 0) return 'field "price_usdc" must be a positive number';
-  if (typeof obj.wallet !== "string" || !(obj.wallet as string).trim()) return 'field "wallet" must be a non-empty string';
+  if (!/^https?:\/\/.+/.test(obj.url as string))
+    return 'field "url" must be a valid HTTP/HTTPS URL';
+  if (typeof obj.price_usdc !== "number" || obj.price_usdc <= 0)
+    return 'field "price_usdc" must be a positive number';
+  if (typeof obj.wallet !== "string" || !(obj.wallet as string).trim())
+    return 'field "wallet" must be a non-empty string';
+  if (!/^G[A-Z2-7]{55}$/.test(obj.wallet as string))
+    return 'field "wallet" must be a valid Stellar public key (starts with G, 56 chars)';
+  // `tags` is optional but must be an array of strings when present
+  if (obj.tags !== undefined) {
+    if (!Array.isArray(obj.tags) || obj.tags.some((t) => typeof t !== "string")) {
+      return 'field "tags" must be an array of strings';
+    }
+  }
   return null;
+}
+
+function extractTags(manifest: Record<string, unknown>): string[] {
+  if (Array.isArray(manifest.tags) && manifest.tags.length > 0) {
+    return [
+      ...new Set((manifest.tags as string[]).map((t) => t.toLowerCase().trim()).filter(Boolean)),
+    ];
+  }
+  // Fall back to tasks as implicit tags
+  if (Array.isArray(manifest.tasks)) {
+    return [
+      ...new Set((manifest.tasks as string[]).map((t) => t.toLowerCase().trim()).filter(Boolean)),
+    ];
+  }
+  return [];
 }
 
 const app = express();
 app.use(express.json());
+
+function parseManifestFile(manifestPath: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  } catch (err) {
+    console.warn(`[registry] Skipping ${manifestPath}: invalid JSON (${(err as Error).message})`);
+    return null;
+  }
+}
 
 function loadManifests() {
   return fs
@@ -60,7 +87,14 @@ function loadManifests() {
     .map((d) => {
       const manifestPath = path.join(AGENTS_DIR, d, "agent.json");
       if (!fs.existsSync(manifestPath)) return null;
-      return JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      const manifest = parseManifestFile(manifestPath);
+      if (!manifest) return null;
+      const schemaError = validateManifest(manifest);
+      if (schemaError) {
+        console.warn(`[registry] Skipping ${manifestPath}: ${schemaError}`);
+        return null;
+      }
+      return manifest;
     })
     .filter(Boolean);
 }
@@ -70,8 +104,8 @@ function loadManifest(agentId: string): Record<string, unknown> | null {
     if (!dir.startsWith("seller-")) continue;
     const manifestPath = path.join(AGENTS_DIR, dir, "agent.json");
     if (!fs.existsSync(manifestPath)) continue;
-    const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-    if (m.id === agentId) return m;
+    const m = parseManifestFile(manifestPath);
+    if (m && m.id === agentId) return m;
   }
   return null;
 }
@@ -79,9 +113,21 @@ function loadManifest(agentId: string): Record<string, unknown> | null {
 function getRequestKey(req: any) {
   return (
     req.ip ||
-    String(req.headers["x-forwarded-for"] ?? "").split(",")[0].trim() ||
+    String(req.headers["x-forwarded-for"] ?? "")
+      .split(",")[0]
+      .trim() ||
     "unknown"
   );
+}
+
+const API_KEY = process.env.REGISTRY_API_KEY || "dev-registry-key";
+
+function requireApiKey(req: any, res: any, next: any) {
+  const key = req.headers["x-api-key"];
+  if (!key || key !== API_KEY) {
+    return res.status(401).json({ error: "Unauthorized: valid API key required" });
+  }
+  next();
 }
 
 function requireRegistryAuth(req: any, res: any, next: any) {
@@ -111,7 +157,7 @@ function getAliveAgents(): Record<string, unknown>[] {
   const alive: Record<string, unknown>[] = [];
   for (const entry of activeAgents.values()) {
     if (now - entry.lastHeartbeat < HEARTBEAT_TIMEOUT_MS) {
-      alive.push({ ...entry.manifest, alive: true });
+      alive.push({ ...entry.manifest, tags: entry.tags, alive: true });
     }
   }
   return alive;
@@ -123,7 +169,8 @@ function getAllAgentsWithStatus(): Record<string, unknown>[] {
     const id = (m as Record<string, unknown>).id as string | undefined;
     const entry = id ? activeAgents.get(id) : undefined;
     const alive = entry !== undefined && now - entry.lastHeartbeat < HEARTBEAT_TIMEOUT_MS;
-    return { ...m, alive };
+    const tags = entry ? entry.tags : extractTags(m as Record<string, unknown>);
+    return { ...m, tags, alive };
   });
 }
 
@@ -146,7 +193,7 @@ setInterval(() => {
   }
 }, HEARTBEAT_INTERVAL_MS);
 
-app.post("/heartbeat", requireRegistryAuth, (req, res) => {
+app.post("/heartbeat", requireApiKey, requireRegistryAuth, (req, res) => {
   const { agentId } = req.body;
   if (!agentId) {
     return res.status(400).json({ error: "missing agentId" });
@@ -162,12 +209,18 @@ app.post("/heartbeat", requireRegistryAuth, (req, res) => {
     return res.status(422).json({ error: `invalid manifest: ${schemaError}` });
   }
 
-  activeAgents.set(agentId, { lastHeartbeat: Date.now(), manifest });
-  res.json({ status: "ok", agentId });
+  activeAgents.set(agentId, { lastHeartbeat: Date.now(), manifest, tags: extractTags(manifest) });
+  res.json({ status: "ok", agentId, tags: extractTags(manifest) });
 });
 
-function filterByTags(agents: Record<string, unknown>[], rawTags: string): Record<string, unknown>[] {
-  const tags = rawTags.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
+function filterByTags(
+  agents: Record<string, unknown>[],
+  rawTags: string,
+): Record<string, unknown>[] {
+  const tags = rawTags
+    .split(",")
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
   if (tags.length === 0) return agents;
   return agents.filter((a) => {
     const agentTags = Array.isArray(a.tags) ? (a.tags as string[]).map((t) => t.toLowerCase()) : [];
